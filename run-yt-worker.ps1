@@ -15,6 +15,13 @@ function Refresh-Path {
   $env:Path = "$machine;$user"
 }
 
+function Ensure-NodePathHint {
+  $defaultNodeDir = "C:\Program Files\nodejs"
+  if ((Test-Path $defaultNodeDir) -and -not ($env:Path -like "*$defaultNodeDir*")) {
+    $env:Path = "$defaultNodeDir;$env:Path"
+  }
+}
+
 function Ensure-Node {
   $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
   $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
@@ -28,19 +35,21 @@ function Ensure-Node {
     throw "winget not found. Install Node.js LTS manually from https://nodejs.org/ and run again."
   }
 
-  & winget install --id OpenJS.NodeJS.LTS --exact --accept-package-agreements --accept-source-agreements
+  & winget install --id OpenJS.NodeJS.LTS --exact --source winget --accept-package-agreements --accept-source-agreements
   Refresh-Path
+  Ensure-NodePathHint
 
   $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
   $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
   if (-not $nodeCmd -or -not $npmCmd) {
-    throw "Node.js/npm not found after install. Restart PowerShell and try again."
+    throw "Node.js/npm not found after install. Restart PowerShell and try again. If needed, add 'C:\Program Files\nodejs' to PATH."
   }
 }
 
 try {
   Set-Location -Path $PSScriptRoot
   Write-Step "Working directory: $PSScriptRoot"
+  Ensure-NodePathHint
 
   Ensure-Node
 
