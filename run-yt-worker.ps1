@@ -5,7 +5,9 @@ param(
   [switch]$UseChromeProfile,
   [int]$ChromeDebugPort = 9222,
   [string]$ChromeUserDataDir = "",
-  [switch]$KeepChromeOpen
+  [switch]$KeepChromeOpen,
+  [switch]$AutoUpdate,
+  [int]$AutoUpdateMinutes = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +15,7 @@ $ErrorActionPreference = "Stop"
 function Write-Step([string]$msg) {
   Write-Host "[run-yt-worker] $msg" -ForegroundColor Cyan
 }
+
 
 function Refresh-Path {
   $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -32,6 +35,29 @@ function Invoke-AndEnsureSuccess([scriptblock]$Command, [string]$ErrorMessage) {
   if ($LASTEXITCODE -ne 0) {
     throw "$ErrorMessage (exit code: $LASTEXITCODE)"
   }
+}
+
+function Test-GitRepo {
+  if (-not (Test-Path ".git")) { return $false }
+  $gitCmd = Get-Command git -ErrorAction SilentlyContinue
+  if (-not $gitCmd) { return $false }
+  return $true
+}
+
+function Get-GitHead {
+  $head = git rev-parse HEAD 2>$null
+  if ($LASTEXITCODE -ne 0) { return $null }
+  return $head.Trim()
+}
+
+function Pull-AndDetectUpdates {
+  if (-not (Test-GitRepo)) { return $false }
+  $before = Get-GitHead
+  if ([string]::IsNullOrWhiteSpace($before)) { return $false }
+  Invoke-AndEnsureSuccess { git pull --ff-only } "git pull failed"
+  $after = Get-GitHead
+  if ([string]::IsNullOrWhiteSpace($after)) { return $false }
+  return ($before -ne $after)
 }
 
 function Test-CdpEndpoint([int]$port) {
@@ -82,6 +108,8 @@ function Start-ChromeForProfile {
     "--user-data-dir=$UserDataDir",
     "--no-first-run",
     "--no-default-browser-check",
+    "--hide-crash-restore-bubble",
+    "--disable-session-crashed-bubble",
     "--disable-default-apps",
     "--disable-notifications",
     "--disable-features=ChromeWhatsNewUI,DesktopPWAsDefaultOff,DesktopPWAsTabStrip",
@@ -167,8 +195,30 @@ try {
     Write-Step "Using existing Chrome profile via CDP: $($env:PLAYWRIGHT_CDP_URL)"
   }
 
-  Write-Step "Running npm run $ScriptName"
-  Invoke-AndEnsureSuccess { npm run $ScriptName } "Script failed: npm run $ScriptName"
+  $runScript = {
+    Write-Step "Running npm run $ScriptName"
+    Invoke-AndEnsureSuccess { npm run $ScriptName } "Script failed: npm run $ScriptName"
+  }
+  & $runScript
+
+  if ($AutoUpdate) {
+    if ($AutoUpdateMinutes -lt 1) { $AutoUpdateMinutes = 5 }
+    if (Test-GitRepo) {
+      Write-Step "AutoUpdate enabled: checking updates every $AutoUpdateMinutes minute(s)"
+      while ($true) {
+        Start-Sleep -Seconds ($AutoUpdateMinutes * 60)
+        $updated = Pull-AndDetectUpdates
+        if ($updated) {
+          Write-Step "Updates found. Restarting script."
+          & $runScript
+        } else {
+          Write-Step "No updates."
+        }
+      }
+    } else {
+      Write-Step "AutoUpdate requested but git repo not detected. Skipping."
+    }
+  }
 
   if ($chromeProc -and -not $KeepChromeOpen) {
     try { Stop-Process -Id $chromeProc.Id -Force -ErrorAction SilentlyContinue } catch {}
