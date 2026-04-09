@@ -89,6 +89,7 @@ async function fetchTask(): Promise<TaskPayload | null> {
 
 async function pullAndDetectUpdates(): Promise<boolean> {
   if (!existsSync(resolve(process.cwd(), ".git"))) {
+    console.warn("[worker] update check skipped: .git directory not found in current working dir");
     return false;
   }
   // lightweight git check using shell command execution via child process
@@ -99,18 +100,26 @@ async function pullAndDetectUpdates(): Promise<boolean> {
       : ["-lc", "git rev-parse HEAD && git pull --ff-only && git rev-parse HEAD"];
   const child = spawn(cmd, args, {
     cwd: process.cwd(),
-    stdio: ["ignore", "pipe", "ignore"],
+    stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
   let out = "";
+  let err = "";
   child.stdout.on("data", (d) => {
     out += String(d);
+  });
+  child.stderr.on("data", (d) => {
+    err += String(d);
   });
   const code = await new Promise<number>((resolveCode) => {
     child.on("exit", (c) => resolveCode(c ?? 1));
     child.on("error", () => resolveCode(1));
   });
-  if (code !== 0) return false;
+  if (code !== 0) {
+    const reason = err.trim() || "git command failed";
+    console.warn(`[worker] update check failed: ${reason}`);
+    return false;
+  }
   const lines = out
     .split(/\r?\n/)
     .map((s) => s.trim())
@@ -144,6 +153,42 @@ function restartWorkerSelf(): void {
           detached: true,
         });
   child.unref();
+}
+
+function restartWorkerViaUpdater(): void {
+  const safeEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined || v === null) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
+    safeEnv[k] = String(v);
+  }
+
+  const updater =
+    process.platform === "win32"
+      ? spawn(
+          process.env.ComSpec ?? "cmd.exe",
+          [
+            "/d",
+            "/s",
+            "/c",
+            "timeout /t 2 /nobreak >nul && git pull --ff-only && npm run worker",
+          ],
+          {
+            cwd: process.cwd(),
+            env: safeEnv,
+            stdio: "inherit",
+            windowsHide: true,
+            detached: true,
+          }
+        )
+      : spawn("sh", ["-lc", "sleep 2 && git pull --ff-only && npm run worker"], {
+          cwd: process.cwd(),
+          env: safeEnv,
+          stdio: "inherit",
+          detached: true,
+        });
+
+  updater.unref();
 }
 
 function toEnvStringMap(config: Record<string, unknown> | undefined): Record<string, string> {
@@ -254,8 +299,8 @@ async function main(): Promise<void> {
         nextUpdateAt = Date.now() + updateMs;
         busy = false;
         if (updated) {
-          console.log("[worker] updates found, restarting worker");
-          restartWorkerSelf();
+          console.log("[worker] updates found, stopping worker to apply update");
+          restartWorkerViaUpdater();
           process.exit(0);
         }
       }
