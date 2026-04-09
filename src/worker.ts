@@ -7,10 +7,12 @@
  *   TARGET_URL=<task endpoint URL>
  *
  * Optional:
- *   TASK_POLL_INTERVAL_MS=300000
+ *   TASK_POLL_INTERVAL_MS=120000
+ *   UPDATE_CHECK_INTERVAL_MS=15000
  */
 
 import { config as loadEnv } from "dotenv";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 
@@ -32,8 +34,13 @@ function envWorkerScript(): string {
 }
 
 function envPollIntervalMs(): number {
-  const n = Number(process.env.TASK_POLL_INTERVAL_MS ?? 300_000);
-  return Number.isFinite(n) && n >= 5_000 ? Math.floor(n) : 300_000;
+  const n = Number(process.env.TASK_POLL_INTERVAL_MS ?? 120_000);
+  return Number.isFinite(n) && n >= 5_000 ? Math.floor(n) : 120_000;
+}
+
+function envUpdateIntervalMs(): number {
+  const n = Number(process.env.UPDATE_CHECK_INTERVAL_MS ?? 15_000);
+  return Number.isFinite(n) && n >= 5_000 ? Math.floor(n) : 15_000;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -45,7 +52,11 @@ function taskIdOf(task: TaskPayload): string {
 }
 
 async function fetchTask(): Promise<TaskPayload | null> {
-  const resp = await fetch(process.env.TARGET_URL?.trim()!, {
+  const endpoint = process.env.TARGET_URL?.trim();
+  if (!endpoint) {
+    throw new Error("TARGET_URL is required (task endpoint URL).");
+  }
+  const resp = await fetch(endpoint, {
     method: "GET",
     headers: {
       Accept: "application/json",
@@ -76,6 +87,65 @@ async function fetchTask(): Promise<TaskPayload | null> {
   return null;
 }
 
+async function pullAndDetectUpdates(): Promise<boolean> {
+  if (!existsSync(resolve(process.cwd(), ".git"))) {
+    return false;
+  }
+  // lightweight git check using shell command execution via child process
+  const cmd = process.platform === "win32" ? "cmd.exe" : "sh";
+  const args =
+    process.platform === "win32"
+      ? ["/d", "/s", "/c", "git rev-parse HEAD && git pull --ff-only && git rev-parse HEAD"]
+      : ["-lc", "git rev-parse HEAD && git pull --ff-only && git rev-parse HEAD"];
+  const child = spawn(cmd, args, {
+    cwd: process.cwd(),
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+  });
+  let out = "";
+  child.stdout.on("data", (d) => {
+    out += String(d);
+  });
+  const code = await new Promise<number>((resolveCode) => {
+    child.on("exit", (c) => resolveCode(c ?? 1));
+    child.on("error", () => resolveCode(1));
+  });
+  if (code !== 0) return false;
+  const lines = out
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (lines.length < 2) return false;
+  const before = lines[0]!;
+  const after = lines[lines.length - 1]!;
+  return before !== after;
+}
+
+function restartWorkerSelf(): void {
+  const safeEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined || v === null) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
+    safeEnv[k] = String(v);
+  }
+  const child =
+    process.platform === "win32"
+      ? spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", "npm run worker"], {
+          cwd: process.cwd(),
+          env: safeEnv,
+          stdio: "inherit",
+          windowsHide: true,
+          detached: true,
+        })
+      : spawn("npm", ["run", "worker"], {
+          cwd: process.cwd(),
+          env: safeEnv,
+          stdio: "inherit",
+          detached: true,
+        });
+  child.unref();
+}
+
 function toEnvStringMap(config: Record<string, unknown> | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   if (!config) return out;
@@ -94,7 +164,7 @@ function toEnvStringMap(config: Record<string, unknown> | undefined): Record<str
 function buildTaskEnv(task: TaskPayload): Record<string, string> {
   const cfg = toEnvStringMap(task.config);
   const out: Record<string, string> = { ...cfg };
-
+  console.log(out)
   // map task fields to current automation env keys (config can override these later)
   if (task.youtubeChannelUrl) out.CHANNEL_TARGET_HREF = task.youtubeChannelUrl;
   if (task.youtubeChannelName) out.CHANNEL_TARGET_NAME = task.youtubeChannelName;
@@ -156,24 +226,56 @@ async function runFillForTask(task: TaskPayload): Promise<number> {
 }
 
 async function main(): Promise<void> {
-  const endpoint = 'https://youtube.com'
-  console.log(process.env.TARGET_URL?.trim())
-
+  const endpoint = process.env.TARGET_URL?.trim();
+  if (!endpoint) {
+    throw new Error("TARGET_URL is required in worker mode (task endpoint URL).");
+  }
   const pollMs = envPollIntervalMs();
-  console.log(`[worker] started, endpoint=${endpoint}, poll=${pollMs}ms`);
+  const updateMs = envUpdateIntervalMs();
+  console.log(
+    `[worker] started, endpoint=${endpoint}, taskPoll=${pollMs}ms, updateCheck=${updateMs}ms`
+  );
+
+  let nextTaskAt = Date.now();
+  let nextUpdateAt = Date.now();
+  let busy = false;
 
   while (true) {
+    if (busy) {
+      await sleep(1000);
+      continue;
+    }
+
+    const now = Date.now();
     try {
-      const task = await fetchTask();
-      if (!task) {
-        console.log("[worker] no task");
-      } else {
-        await runFillForTask(task);
+      if (now >= nextUpdateAt) {
+        busy = true;
+        const updated = await pullAndDetectUpdates();
+        nextUpdateAt = Date.now() + updateMs;
+        busy = false;
+        if (updated) {
+          console.log("[worker] updates found, restarting worker");
+          restartWorkerSelf();
+          process.exit(0);
+        }
+      }
+
+      if (now >= nextTaskAt) {
+        busy = true;
+        const task = await fetchTask();
+        nextTaskAt = Date.now() + pollMs;
+        if (!task) {
+          console.log("[worker] no task");
+        } else {
+          await runFillForTask(task);
+        }
+        busy = false;
       }
     } catch (e) {
+      busy = false;
       console.error("[worker] poll/run error:", e);
     }
-    await sleep(pollMs);
+    await sleep(1000);
   }
 }
 
