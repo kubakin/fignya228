@@ -11,6 +11,7 @@
  *   youtubeChannelUrl → CHANNEL_TARGET_HREF
  *   youtubeChannelName → CHANNEL_TARGET_NAME
  *   youtubeChannelDescription / youtubeChanngelDescription → TEXT (stage1 search)
+ *   videoPrefix + youtubeVideoDescription → TEXT when videoPrefix is non-empty (space between)
  *   youtubeVideoDescription → VIDEO_TARGET_NAME (optional) + TEXT fallback
  *   teamApiKey → TEAM_API_KEY
  *
@@ -28,6 +29,7 @@ loadEnv({ path: resolve(process.cwd(), ".env") });
 
 type TaskPayload = {
   hasTask?: boolean;
+  videoPrefix?: string;
   taskId?: string;
   /** Server typo; some responses use this instead of taskId */
   tastId?: string;
@@ -234,6 +236,7 @@ function buildTaskEnv(task: TaskPayload): Record<string, string> {
   // - youtubeVideoUrl → VIDEO_TARGET_HREF (target watch URL / fallback / video search)
   // - youtubeChannelUrl → CHANNEL_TARGET_HREF
   // - youtubeChannelDescription (or typo youtubeChanngelDescription) → TEXT (stage1 search query)
+  // - videoPrefix non-empty → TEXT = videoPrefix + " " + youtubeVideoDescription
   if (task.youtubeChannelUrl) out.CHANNEL_TARGET_HREF = task.youtubeChannelUrl;
   if (task.youtubeChannelName) out.CHANNEL_TARGET_NAME = task.youtubeChannelName;
   if (task.youtubeVideoUrl) out.VIDEO_TARGET_HREF = task.youtubeVideoUrl;
@@ -244,17 +247,23 @@ function buildTaskEnv(task: TaskPayload): Record<string, string> {
     out.TEAM_API_KEY = task.teamApiKey;
   }
 
-  // Stage1 search text: channel/project description, not video title (unless config sets TEXT)
+  // Stage1 search text (unless config sets TEXT)
   if (!out.TEXT) {
-    const channelDesc =
-      task.youtubeChannelDescription?.trim() ||
-      task.youtubeChanngelDescription?.trim() ||
-      "";
-    out.TEXT =
-      channelDesc ||
-      task.youtubeChannelName?.trim() ||
-      task.youtubeVideoDescription?.trim() ||
-      "";
+    const prefix = task.videoPrefix?.trim() ?? "";
+    if (prefix.length > 0) {
+      const vidDesc = task.youtubeVideoDescription?.trim() ?? "";
+      out.TEXT = vidDesc.length > 0 ? `${prefix} ${vidDesc}` : prefix;
+    } else {
+      const channelDesc =
+        task.youtubeChannelDescription?.trim() ||
+        task.youtubeChanngelDescription?.trim() ||
+        "";
+      out.TEXT =
+        channelDesc ||
+        task.youtubeChannelName?.trim() ||
+        task.youtubeVideoDescription?.trim() ||
+        "";
+    }
   }
 
   // keep reasonable defaults if server config does not provide them
