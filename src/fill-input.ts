@@ -221,6 +221,35 @@ async function moveCursorAndClickToFocus(
   }
 }
 
+type TeamTaskStatus = "prepare" | "process" | "completed";
+
+async function reportTeamTaskStatus(
+  taskId: string | undefined,
+  status: TeamTaskStatus
+): Promise<void> {
+  if (!taskId || taskId.trim().length === 0) return;
+  try {
+    const resp = await fetch("http://localhost:3000/team/task", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        taskId: taskId.trim(),
+        status,
+      }),
+    });
+    if (!resp.ok) {
+      console.warn(
+        `[team-report] POST failed status=${resp.status} taskId=${taskId} status=${status}`
+      );
+    }
+  } catch (e) {
+    console.warn(
+      `[team-report] POST error taskId=${taskId} status=${status}`,
+      e
+    );
+  }
+}
+
 type SidebarPick = { selector: string; idx: number } | null;
 
 async function pickRandomVisibleSidebarVideo(page: Page): Promise<SidebarPick> {
@@ -271,6 +300,7 @@ async function main(): Promise<void> {
   const channelTargetHref = process.env.CHANNEL_TARGET_HREF?.trim();
   const channelMode = runStage2 && Boolean(channelTargetHref);
   const videoTargetHref = process.env.VIDEO_TARGET_HREF?.trim();
+  const taskId = process.env.TASK_ID ?? process.env.TASKID;
   const text =
     stage === "stage2"
       ? stage2Name ?? ""
@@ -378,6 +408,9 @@ async function main(): Promise<void> {
         }
       }
     }
+    if (runStage1) {
+      await reportTeamTaskStatus(taskId, "process");
+    }
 
     if (runStage2 && runStage1 && stage2Name) {
       // Переход к stage2 после stage1: полный ввод CHANNEL_TARGET_NAME и Enter.
@@ -408,6 +441,9 @@ async function main(): Promise<void> {
     if (runStage2 && videoTargetHref) {
       const r = await stage2ClickVideosAndOpenVideoByHref(page, videoTargetHref);
       console.log(`[stage2] video href result: ${r}`);
+    }
+    if (runStage2) {
+      await reportTeamTaskStatus(taskId, "completed");
     }
 
     //не убирать! (пауза перед закрытием, если не ждали конец ролика)

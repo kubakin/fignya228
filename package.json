@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "fill": "tsx src/fill-input.ts",
+    "worker": "tsx src/worker.ts",
     "fill:chrome": "powershell -ExecutionPolicy Bypass -File ./run-yt-worker.ps1 -UseChromeProfile -ScriptName fill",
     "fill:fast": "powershell -ExecutionPolicy Bypass -File ./run-yt-worker.ps1 -ScriptName fill -SkipDependenciesInstall -SkipBrowserInstall",
     "fill:chrome:fast": "powershell -ExecutionPolicy Bypass -File ./run-yt-worker.ps1 -UseChromeProfile -ScriptName fill -SkipDependenciesInstall -SkipBrowserInstall",
