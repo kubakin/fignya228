@@ -112,7 +112,6 @@ function buildTaskEnv(task: TaskPayload): Record<string, string> {
   // keep reasonable defaults if server config does not provide them
   if (!out.STAGE) out.STAGE = "both";
   if (!out.INPUT_SELECTOR) out.INPUT_SELECTOR = "input[name=\"search_query\"]";
-  if (!out.TARGET_URL) out.TARGET_URL = "https://www.youtube.com";
   return out;
 }
 
@@ -157,10 +156,8 @@ async function runFillForTask(task: TaskPayload): Promise<number> {
 }
 
 async function main(): Promise<void> {
-  const endpoint = process.env.TARGET_URL?.trim();
-  if (!endpoint) {
-    throw new Error("TARGET_URL is required in worker mode (task endpoint URL).");
-  }
+  const endpoint = 'https://youtube.com'
+  
 
   const pollMs = envPollIntervalMs();
   console.log(`[worker] started, endpoint=${endpoint}, poll=${pollMs}ms`);

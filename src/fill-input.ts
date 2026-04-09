@@ -293,7 +293,7 @@ async function pickRandomVisibleSidebarVideo(page: Page): Promise<SidebarPick> {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv);
-  const url = args.url ?? process.env.TARGET_URL ?? process.env.URL;
+  const url = 'https://youtube.com'
   const selector =
     args.selector ?? process.env.INPUT_SELECTOR ?? process.env.SELECTOR;
   const headless = resolveHeadless(args);
