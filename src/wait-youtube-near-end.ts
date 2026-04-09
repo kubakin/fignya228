@@ -261,6 +261,31 @@ function targetRatio(): number {
   return randFloat(clampedLo, clampedHi);
 }
 
+function envWatchSec(name: string): number | undefined {
+  const v = Number(process.env[name]?.trim());
+  if (!Number.isFinite(v) || v < 0) return undefined;
+  return v;
+}
+
+function resolveTargetWatchSec(durationSec: number, ratio: number): number {
+  const byRatio = durationSec * ratio;
+  const minSecRaw = envWatchSec("VIDEO_WATCH_MIN_SEC");
+  const maxSecRaw = envWatchSec("VIDEO_WATCH_MAX_SEC");
+
+  if (minSecRaw !== undefined && maxSecRaw !== undefined) {
+    const lo = Math.min(minSecRaw, maxSecRaw);
+    const hi = Math.max(minSecRaw, maxSecRaw);
+    return Math.max(0, Math.min(durationSec - 0.5, randFloat(lo, hi)));
+  }
+  if (minSecRaw !== undefined) {
+    return Math.max(0, Math.min(durationSec - 0.5, Math.max(byRatio, minSecRaw)));
+  }
+  if (maxSecRaw !== undefined) {
+    return Math.max(0, Math.min(durationSec - 0.5, Math.min(byRatio, maxSecRaw)));
+  }
+  return Math.max(0, Math.min(durationSec - 0.5, byRatio));
+}
+
 /**
  * Если открыта страница просмотра YouTube — ждём готовности `video`, при необходимости
  * запускаем воспроизведение и ждём, пока currentTime/duration не достигнет целевой доли.
@@ -275,6 +300,7 @@ export async function waitForYoutubeVideoNearEndIfWatch(page: Page): Promise<boo
   const target = targetRatio();
   const timeoutMs = envTimeoutMs();
   let lastKnownRatio = 0;
+  let targetWatchSec: number | null = null;
 
   videoLog("страница watch", {
     url: page.url(),
@@ -297,11 +323,21 @@ export async function waitForYoutubeVideoNearEndIfWatch(page: Page): Promise<boo
       Number.isFinite(snapReady.duration) &&
       snapReady.duration > 0
     ) {
+      if (targetWatchSec === null) {
+        targetWatchSec = resolveTargetWatchSec(snapReady.duration, target);
+      }
       const r = snapReady.currentTime / snapReady.duration;
       if (Number.isFinite(r) && r >= 0) lastKnownRatio = Math.max(lastKnownRatio, r);
+      const targetRatioNow =
+        snapReady.duration > 0
+          ? Math.max(0, Math.min(1, (targetWatchSec ?? 0) / snapReady.duration))
+          : 0;
       videoLog("метаданные плеера", {
         durationSec: Number(snapReady.duration.toFixed(2)),
-        targetTimeSec: Number((snapReady.duration * target).toFixed(2)),
+        targetTimeSec: Number((targetWatchSec ?? 0).toFixed(2)),
+        targetRatioNow: Number(targetRatioNow.toFixed(4)),
+        watchMinSec: envWatchSec("VIDEO_WATCH_MIN_SEC") ?? null,
+        watchMaxSec: envWatchSec("VIDEO_WATCH_MAX_SEC") ?? null,
         paused: snapReady.paused,
         playbackRate: snapReady.playbackRate,
         readyState: snapReady.readyState,
@@ -316,6 +352,13 @@ export async function waitForYoutubeVideoNearEndIfWatch(page: Page): Promise<boo
       if (v && (v as HTMLVideoElement).paused) void (v as HTMLVideoElement).play();
     });
 
+    if (targetWatchSec === null) {
+      const s = await page.evaluate(evalVideoSnapshot);
+      if (s && Number.isFinite(s.duration) && s.duration > 0) {
+        targetWatchSec = resolveTargetWatchSec(s.duration, target);
+      }
+    }
+
     const tickMs = progressTickIntervalMs();
     const logProgressSnapshot = (): void => {
       void Promise.all([
@@ -328,13 +371,17 @@ export async function waitForYoutubeVideoNearEndIfWatch(page: Page): Promise<boo
         if (!isAd && Number.isFinite(rr) && rr >= 0) {
           lastKnownRatio = Math.max(lastKnownRatio, rr);
         }
+        const needPercent =
+          targetWatchSec !== null && s.duration > 0
+            ? (targetWatchSec / s.duration) * 100
+            : target * 100;
         videoLog("прогресс", {
           currentSec: Number(s.currentTime.toFixed(2)),
           durationSec: Number(s.duration.toFixed(2)),
           percent: Number(pct.toFixed(2)),
           paused: s.paused,
           ad: isAd,
-          needPercent: Number((target * 100).toFixed(2)),
+          needPercent: Number(needPercent.toFixed(2)),
         });
       });
     };
@@ -343,7 +390,7 @@ export async function waitForYoutubeVideoNearEndIfWatch(page: Page): Promise<boo
 
     try {
       await page.waitForFunction(
-        function ({ ratio }: { ratio: number }) {
+        function ({ targetSec }: { targetSec: number }) {
           const player = document.querySelector("#movie_player");
           if (player && (player as Element).classList.contains("ad-showing")) {
             return false;
@@ -364,9 +411,9 @@ export async function waitForYoutubeVideoNearEndIfWatch(page: Page): Promise<boo
           if (!v) return false;
           const d = (v as HTMLVideoElement).duration;
           if (typeof d !== "number" || !Number.isFinite(d) || d <= 0) return false;
-          return (v as HTMLVideoElement).currentTime / d >= ratio;
+          return (v as HTMLVideoElement).currentTime >= targetSec;
         },
-        { ratio: target },
+        { targetSec: targetWatchSec ?? Number.MAX_SAFE_INTEGER },
         {
           timeout: timeoutMs === 0 ? 0 : timeoutMs,
           polling: 500,
