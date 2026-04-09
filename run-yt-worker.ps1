@@ -1,6 +1,7 @@
 param(
   [string]$ScriptName = "fill",
   [switch]$SkipBrowserInstall,
+  [switch]$SkipDependenciesInstall,
   [switch]$UseChromeProfile,
   [int]$ChromeDebugPort = 9222,
   [string]$ChromeUserDataDir = "",
@@ -122,12 +123,16 @@ try {
   Write-Step "node: $(node -v)"
   Write-Step "npm: $(npm -v)"
 
-  if (Test-Path "package-lock.json") {
-    Write-Step "Installing dependencies: npm ci"
-    npm ci
+  if (-not $SkipDependenciesInstall) {
+    if (Test-Path "package-lock.json") {
+      Write-Step "Installing dependencies: npm ci"
+      npm ci
+    } else {
+      Write-Step "Installing dependencies: npm install"
+      npm install
+    }
   } else {
-    Write-Step "Installing dependencies: npm install"
-    npm install
+    Write-Step "Skipping dependencies install"
   }
 
   if (-not $SkipBrowserInstall) {
