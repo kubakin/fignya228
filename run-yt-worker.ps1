@@ -1,6 +1,10 @@
 param(
   [string]$ScriptName = "fill",
-  [switch]$SkipBrowserInstall
+  [switch]$SkipBrowserInstall,
+  [switch]$UseChromeProfile,
+  [int]$ChromeDebugPort = 9222,
+  [string]$ChromeUserDataDir = "",
+  [switch]$KeepChromeOpen
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,6 +24,68 @@ function Ensure-NodePathHint {
   if ((Test-Path $defaultNodeDir) -and -not ($env:Path -like "*$defaultNodeDir*")) {
     $env:Path = "$defaultNodeDir;$env:Path"
   }
+}
+
+function Test-CdpEndpoint([int]$port) {
+  try {
+    $null = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/json/version" -TimeoutSec 2
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+function Get-ChromePath {
+  $candidates = @(
+    "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+    "$env:ProgramFiles(x86)\Google\Chrome\Application\chrome.exe",
+    "$env:LocalAppData\Google\Chrome\Application\chrome.exe"
+  )
+  foreach ($p in $candidates) {
+    if (Test-Path $p) { return $p }
+  }
+  return $null
+}
+
+function Start-ChromeForProfile {
+  param(
+    [int]$Port,
+    [string]$UserDataDir
+  )
+
+  if (Test-CdpEndpoint -port $Port) {
+    Write-Step "Chrome CDP endpoint already available at :$Port"
+    return $null
+  }
+
+  $chromePath = Get-ChromePath
+  if (-not $chromePath) {
+    throw "Google Chrome not found. Install Chrome or start it manually with --remote-debugging-port=$Port."
+  }
+
+  if ([string]::IsNullOrWhiteSpace($UserDataDir)) {
+    $UserDataDir = Join-Path $PSScriptRoot "chrome-profile"
+  }
+  New-Item -ItemType Directory -Path $UserDataDir -Force | Out-Null
+
+  Write-Step "Starting Chrome with persistent profile: $UserDataDir"
+  $args = @(
+    "--remote-debugging-port=$Port",
+    "--user-data-dir=$UserDataDir",
+    "--new-window",
+    "https://www.youtube.com"
+  )
+  $proc = Start-Process -FilePath $chromePath -ArgumentList $args -PassThru
+
+  $ok = $false
+  for ($i = 0; $i -lt 20; $i++) {
+    Start-Sleep -Milliseconds 500
+    if (Test-CdpEndpoint -port $Port) { $ok = $true; break }
+  }
+  if (-not $ok) {
+    throw "Chrome started but CDP endpoint not reachable at http://127.0.0.1:$Port"
+  }
+  return $proc
 }
 
 function Ensure-Node {
@@ -69,8 +135,20 @@ try {
     npx playwright install chromium
   }
 
+  $chromeProc = $null
+  if ($UseChromeProfile) {
+    $chromeProc = Start-ChromeForProfile -Port $ChromeDebugPort -UserDataDir $ChromeUserDataDir
+    $env:PLAYWRIGHT_CDP_URL = "http://127.0.0.1:$ChromeDebugPort"
+    $env:HEADLESS = "false"
+    Write-Step "Using existing Chrome profile via CDP: $($env:PLAYWRIGHT_CDP_URL)"
+  }
+
   Write-Step "Running npm run $ScriptName"
   npm run $ScriptName
+
+  if ($chromeProc -and -not $KeepChromeOpen) {
+    try { Stop-Process -Id $chromeProc.Id -Force -ErrorAction SilentlyContinue } catch {}
+  }
 
   Write-Host "[run-yt-worker] Done." -ForegroundColor Green
 } catch {
