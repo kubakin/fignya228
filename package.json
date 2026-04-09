@@ -1,0 +1,28 @@
+{
+  "name": "site-input-filler",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fill": "tsx src/fill-input.ts",
+    "stage1": "cross-env STAGE=stage1 tsx src/fill-input.ts",
+    "stage2": "cross-env STAGE=stage2 tsx src/fill-input.ts",
+    "typecheck": "tsc --noEmit",
+    "install:browsers": "playwright install chromium",
+    "build:bundle": "node scripts/build-exe.mjs --bundle-only",
+    "build:exe": "node scripts/build-exe.mjs"
+  },
+  "dependencies": {
+    "@nut-tree-fork/nut-js": "^4.2.6",
+    "dotenv": "^16.4.7",
+    "playwright": "^1.51.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@yao-pkg/pkg": "^6.14.2",
+    "cross-env": "^10.1.0",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
