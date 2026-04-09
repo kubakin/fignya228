@@ -44,8 +44,8 @@ function taskIdOf(task: TaskPayload): string {
   return (task.taskId ?? "").trim();
 }
 
-async function fetchTask(endpoint: string): Promise<TaskPayload | null> {
-  const resp = await fetch(endpoint, {
+async function fetchTask(): Promise<TaskPayload | null> {
+  const resp = await fetch(process.env.TARGET_URL?.trim()!, {
     method: "GET",
     headers: {
       Accept: "application/json",
@@ -164,7 +164,7 @@ async function main(): Promise<void> {
 
   while (true) {
     try {
-      const task = await fetchTask(endpoint);
+      const task = await fetchTask();
       if (!task) {
         console.log("[worker] no task");
       } else {
