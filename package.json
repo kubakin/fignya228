@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "fill": "tsx src/fill-input.ts",
+    "fill:chrome": "powershell -ExecutionPolicy Bypass -File ./run-yt-worker.ps1 -UseChromeProfile -ScriptName fill",
     "stage1": "cross-env STAGE=stage1 tsx src/fill-input.ts",
     "stage2": "cross-env STAGE=stage2 tsx src/fill-input.ts",
+    "stage2:chrome": "powershell -ExecutionPolicy Bypass -File ./run-yt-worker.ps1 -UseChromeProfile -ScriptName stage2",
     "typecheck": "tsc --noEmit",
     "install:browsers": "playwright install chromium",
     "build:bundle": "node scripts/build-exe.mjs --bundle-only",
