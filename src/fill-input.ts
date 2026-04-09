@@ -54,7 +54,8 @@
  *     PLAYWRIGHT_USER_DATA_DIR=путь — постоянный профиль (куки между запусками); опционально PLAYWRIGHT_BROWSER_CHANNEL=chrome|msedge|chromium
  */
 
-import { sleep } from "@nut-tree-fork/nut-js";
+import { keyboard, sleep } from "@nut-tree-fork/nut-js";
+import { Key } from "@nut-tree-fork/shared";
 import { config as loadEnv } from "dotenv";
 import { resolve } from "node:path";
 import type { Locator, Page } from "playwright";
@@ -254,6 +255,7 @@ async function reportTeamTaskStatus(
 }
 
 type SidebarPick = { selector: string; idx: number } | null;
+type Stage2Variant = "variant1" | "variant2" | "variant3" | "variant4";
 
 async function pickRandomVisibleSidebarVideo(page: Page): Promise<SidebarPick> {
   const selectors = [
@@ -290,42 +292,240 @@ async function pickRandomVisibleSidebarVideo(page: Page): Promise<SidebarPick> {
   return null;
 }
 
+function parseProb(name: string, fallback: number): number {
+  const n = Number(process.env[name]?.trim());
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, n);
+}
+
+function pickWeightedVariant(candidates: Array<{ variant: Stage2Variant; weight: number }>): Stage2Variant {
+  const sanitized = candidates
+    .map((x) => ({ ...x, weight: Number.isFinite(x.weight) ? Math.max(0, x.weight) : 0 }))
+    .filter((x) => x.weight > 0);
+  if (sanitized.length === 0) return "variant1";
+  const sum = sanitized.reduce((acc, x) => acc + x.weight, 0);
+  let r = Math.random() * sum;
+  for (const x of sanitized) {
+    r -= x.weight;
+    if (r <= 0) return x.variant;
+  }
+  return sanitized[sanitized.length - 1]!.variant;
+}
+
+function resolveStage2Variant(opts: {
+  stage2Name?: string;
+  channelTargetHref?: string;
+  videoTargetHref?: string;
+  videoTargetName?: string;
+}): Stage2Variant {
+  const candidates: Array<{ variant: Stage2Variant; weight: number }> = [];
+  const v1w = parseProb("STAGE2_VARIANT1_PROB", 0.0);
+  const v2w = parseProb("STAGE2_VARIANT2_PROB", 0.30);
+  const v3w = parseProb("STAGE2_VARIANT3_PROB", 0.70);
+  if (opts.channelTargetHref && opts.videoTargetHref) candidates.push({ variant: "variant1", weight: v1w });
+  if (opts.stage2Name && opts.videoTargetHref) candidates.push({ variant: "variant2", weight: v2w });
+  if (opts.videoTargetName || opts.videoTargetHref) candidates.push({ variant: "variant3", weight: v3w });
+  console.log(
+    `[stage2] weights v1=${v1w} v2=${v2w} v3=${v3w}; inputs channelName=${Boolean(
+      opts.stage2Name
+    )} channelHref=${Boolean(opts.channelTargetHref)} videoHref=${Boolean(
+      opts.videoTargetHref
+    )} videoName=${Boolean(opts.videoTargetName)}`
+  );
+  return pickWeightedVariant(candidates);
+}
+
+function shouldSkipStage1ByChance(baseRunStage1: boolean): boolean {
+  if (!baseRunStage1) return false;
+  const p = Math.min(1, parseProb("STAGE1_SKIP_PROB", 0));
+  return Math.random() < p;
+}
+
+async function nutSearchFromAddressBar(query: string): Promise<void> {
+  const q = query.trim();
+  if (!q) return;
+  keyboard.config.autoDelayMs = 0;
+  await sleep(randFloat(160, 360));
+  if (process.platform === "darwin") await keyboard.type(Key.LeftSuper, Key.L);
+  else await keyboard.type(Key.LeftControl, Key.L);
+  await sleep(randFloat(100, 220));
+  await keyboard.type(q);
+  await sleep(randFloat(120, 260));
+  await keyboard.type(Key.Enter);
+  await sleep(randFloat(1200, 2400));
+}
+
+function stage2TimeoutMs(): number {
+  const n = Number(process.env.STAGE2_VARIANT_TIMEOUT_MS ?? 120_000);
+  return Number.isFinite(n) && n >= 10_000 ? Math.floor(n) : 120_000;
+}
+
+async function hasCaptchaOrVerification(page: Page): Promise<boolean> {
+  try {
+    const url = page.url().toLowerCase();
+    if (
+      url.includes("captcha") ||
+      url.includes("sorry") ||
+      url.includes("consent.youtube.com")
+    ) {
+      return true;
+    }
+    const bodyText = await page.evaluate(() => (document.body?.innerText || "").toLowerCase());
+    return (
+      bodyText.includes("captcha") ||
+      bodyText.includes("verify you are human") ||
+      bodyText.includes("подтвердите") ||
+      bodyText.includes("я не робот")
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function stage2Variant4DirectNavigate(opts: {
+  page: Page;
+  channelTargetHref?: string;
+  videoTargetHref?: string;
+}): Promise<void> {
+  const directHref = (opts.videoTargetHref?.trim() || opts.channelTargetHref?.trim() || "");
+  if (!directHref) {
+    throw new Error("stage2 variant4: no direct link available (VIDEO_TARGET_HREF/CHANNEL_TARGET_HREF).");
+  }
+  console.log(`[stage2] fallback variant4 direct navigate: ${directHref}`);
+  await nutSearchFromAddressBar(directHref);
+  await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
+  await ensureVideoPlayingIfPaused(opts.page);
+}
+
+async function ensureVideoPlayingIfPaused(page: Page): Promise<void> {
+  const snap = await page.evaluate(() => {
+    const v =
+      document.querySelector("ytd-player video") ??
+      document.querySelector("#movie_player video") ??
+      document.querySelector("video");
+    if (!v) return { hasVideo: false, paused: false };
+    const vv = v as HTMLVideoElement;
+    return { hasVideo: true, paused: vv.paused };
+  });
+
+  if (!snap.hasVideo) return;
+  if (!snap.paused) return;
+
+  console.log("[stage2] variant4: video is paused, trying to start playback");
+  const video = page.locator("#movie_player video, ytd-player video, video").first();
+  try {
+    await video.waitFor({ state: "visible", timeout: 7000 });
+    await nutHumanMoveAndClick(video);
+    await sleep(randFloat(180, 360));
+    await keyboard.type("k");
+    await sleep(randFloat(300, 700));
+  } catch {
+    // Fallback: try hotkey only.
+    await keyboard.type("k");
+    await sleep(randFloat(300, 700));
+  }
+
+  const after = await page.evaluate(() => {
+    const v =
+      document.querySelector("ytd-player video") ??
+      document.querySelector("#movie_player video") ??
+      document.querySelector("video");
+    return v ? !(v as HTMLVideoElement).paused : true;
+  });
+  console.log(`[stage2] variant4: playback active=${after}`);
+}
+
+async function findAndClickVisibleSearchLink(page: Page, opts: {
+  hrefNeedle?: string;
+  textNeedle?: string;
+  timeoutMs: number;
+}): Promise<boolean> {
+  const started = Date.now();
+  const hrefNeedle = (opts.hrefNeedle ?? "").trim().toLowerCase();
+  const textNeedle = (opts.textNeedle ?? "").trim().toLowerCase();
+
+  while (Date.now() - started < opts.timeoutMs) {
+    const idx = await page.evaluate(
+      ({ hNeedle, tNeedle }: { hNeedle: string; tNeedle: string }) => {
+        const links = document.querySelectorAll("a[href]");
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const normalizeHref = (rawHref: string): string => {
+          try {
+            const u = new URL(rawHref, window.location.href);
+            if ((u.hostname.includes("google.") || u.hostname.includes("yandex.")) && u.searchParams.get("q")) {
+              return (u.searchParams.get("q") || "").toLowerCase();
+            }
+            return u.href.toLowerCase();
+          } catch {
+            return rawHref.toLowerCase();
+          }
+        };
+
+        for (let i = 0; i < links.length; i++) {
+          const el = links[i] as HTMLAnchorElement;
+          const r = el.getBoundingClientRect();
+          const intersects =
+            r.width > 0 &&
+            r.height > 0 &&
+            r.bottom > 0 &&
+            r.right > 0 &&
+            r.left < vw &&
+            r.top < vh;
+          if (!intersects) continue;
+          const hrefNorm = normalizeHref(el.href || el.getAttribute("href") || "");
+          const txt = (el.innerText || el.textContent || "").trim().toLowerCase();
+          if (!hrefNorm) continue;
+          const hrefOk = !hNeedle || hrefNorm.includes(hNeedle);
+          const textOk = !tNeedle || txt.includes(tNeedle);
+          if (hrefOk && textOk) return i;
+        }
+        return -1;
+      },
+      { hNeedle: hrefNeedle, tNeedle: textNeedle }
+    );
+
+    if (idx >= 0) {
+      const link = page.locator("a[href]").nth(idx);
+      await link.scrollIntoViewIfNeeded();
+      await nutHumanMoveAndClick(link);
+      return true;
+    }
+
+    await keyboard.type(Key.PageDown);
+    await sleep(randFloat(600, 1400));
+  }
+
+  return false;
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv);
   const url = 'https://youtube.com'
-  const selector =
-    args.selector ?? process.env.INPUT_SELECTOR ?? process.env.SELECTOR;
+  const selector = 'input[name="search_query"]'
   const headless = resolveHeadless(args);
   const stage = (process.env.STAGE ?? "both").trim().toLowerCase();
-  const runStage1 = stage !== "stage2";
+  const runStage1Base = stage !== "stage2";
   const runStage2 = stage !== "stage1";
+  const runStage1 = runStage1Base && !shouldSkipStage1ByChance(runStage1Base);
   const stage2Name = process.env.CHANNEL_TARGET_NAME?.trim();
   const channelTargetHref = process.env.CHANNEL_TARGET_HREF?.trim();
   const channelMode = runStage2 && Boolean(channelTargetHref);
   const videoTargetHref = process.env.VIDEO_TARGET_HREF?.trim();
+  const videoTargetName = process.env.VIDEO_TARGET_NAME?.trim();
   const taskId = process.env.TASK_ID ?? process.env.TASKID;
-  const text =
-    stage === "stage2"
-      ? stage2Name ?? ""
-      : args.text ?? process.env.TEXT ?? "Hello world";
+  const text = args.text ?? process.env.TEXT ?? "Hello world";
 
   ensurePlaywrightBrowsersIfNeeded();
 
-  if (stage === "stage2" && !text) {
-    console.error(
-      "Для STAGE=stage2 укажите CHANNEL_TARGET_NAME (текст, который нужно вбить в поиск)."
-    );
-    process.exit(1);
-  }
-
-  if (!url || !selector) {
-    console.error(
-      "Укажите URL и селектор инпута:\n" +
-        "  npm run fill -- --url <URL> --selector <CSS_SELECTOR>\n" +
-        "или переменные TARGET_URL и INPUT_SELECTOR"
-    );
-    process.exit(1);
-  }
+  // if (!url || !selector) {
+  //   console.error(
+  //     "Укажите URL и селектор инпута:\n" +
+  //       "  npm run fill -- --url <URL> --selector <CSS_SELECTOR>\n" +
+  //       "или переменные TARGET_URL и INPUT_SELECTOR"
+  //   );
+  //   process.exit(1);
+  // }
 
   const { page, close } = await createBrowserSession(headless);
   try {
@@ -336,34 +536,38 @@ async function main(): Promise<void> {
     await moveCursorAndClickToFocus(page, input, headless);
     const typoRatio = resolveTypoRatio();
     const useNutKb = shouldUseNutKeyboard(headless);
-    if (stage === "stage2") {
-      // stage2: всегда полный ввод и Enter (без 50/50 и без подсказок).
-      if (useNutKb) {
-        await typeTextWithNut(text, { typoRatio });
-      } else {
-        await typeTextWithPlaywright(page, text, { typoRatio });
-      }
-      await pressEnterAfterTyping(page, useNutKb);
-      await sleep(randFloat(1000, 3000));
-    } else {
-      const ytSplit = getPartialTypingSplitForSuggestion(text, headless);
-      /** true: частичный ввод + подсказка, без Enter, сразу скролл. false: полный ввод, Enter, скролл. */
-      const partialFlowNoEnter = Math.random() < 0.5;
+    let stage1Completed = false;
+    if (runStage1) {
+      try {
+        const ytSplit = getPartialTypingSplitForSuggestion(text, headless);
+        /** true: частичный ввод + подсказка, без Enter, сразу скролл. false: полный ввод, Enter, скролл. */
+        const partialFlowNoEnter = Math.random() < 0.5;
 
-      if (partialFlowNoEnter) {
-        if (ytSplit) {
-          if (useNutKb) {
-            await typeTextWithNut(ytSplit.first, { typoRatio });
-          } else {
-            await typeTextWithPlaywright(page, ytSplit.first, { typoRatio });
-          }
-          await maybeClickRandomYtSuggestion(page, text, headless);
-          if (ytSplit.rest.length > 0) {
+        if (partialFlowNoEnter) {
+          if (ytSplit) {
             if (useNutKb) {
-              await typeTextWithNut(ytSplit.rest, { typoRatio });
+              await typeTextWithNut(ytSplit.first, { typoRatio });
             } else {
-              await typeTextWithPlaywright(page, ytSplit.rest, { typoRatio });
+              await typeTextWithPlaywright(page, ytSplit.first, { typoRatio });
             }
+            await maybeClickRandomYtSuggestion(page, text, headless);
+            if (ytSplit.rest.length > 0) {
+              if (useNutKb) {
+                await typeTextWithNut(ytSplit.rest, { typoRatio });
+              } else {
+                await typeTextWithPlaywright(page, ytSplit.rest, { typoRatio });
+              }
+            }
+          } else {
+            if (useNutKb) {
+              await typeTextWithNut(text, { typoRatio });
+            } else {
+              await typeTextWithPlaywright(page, text, { typoRatio });
+            }
+          }
+          // Во втором этапе нужен переход на результаты, поэтому Enter обязателен.
+          if (channelMode) {
+            await pressEnterAfterTyping(page, useNutKb);
           }
         } else {
           if (useNutKb) {
@@ -371,24 +575,19 @@ async function main(): Promise<void> {
           } else {
             await typeTextWithPlaywright(page, text, { typoRatio });
           }
-        }
-        // Во втором этапе нужен переход на результаты, поэтому Enter обязателен.
-        if (channelMode) {
+          await maybeClickRandomYtSuggestion(page, text, headless);
           await pressEnterAfterTyping(page, useNutKb);
         }
-      } else {
-        if (useNutKb) {
-          await typeTextWithNut(text, { typoRatio });
-        } else {
-          await typeTextWithPlaywright(page, text, { typoRatio });
-        }
-        await maybeClickRandomYtSuggestion(page, text, headless);
-        await pressEnterAfterTyping(page, useNutKb);
+        stage1Completed = true;
+      } catch (e) {
+        console.warn("[stage1] failed, continuing to stage2:", e);
       }
+    } else if (runStage1Base) {
+      console.log("[stage1] skipped by STAGE1_SKIP_PROB");
     }
 
     let videoNearEndDone = false;
-    if (runStage1 && shouldRunNutScroll(headless)) {
+    if (stage1Completed && shouldRunNutScroll(headless)) {
       await runHumanScrollDownPhase(page);
       if (!headless) {
         await nutClickVideoTitleLink(page);
@@ -411,39 +610,119 @@ async function main(): Promise<void> {
         }
       }
     }
-    if (runStage1) {
+    if (stage1Completed) {
       await reportTeamTaskStatus(taskId, "process");
     }
 
-    if (runStage2 && runStage1 && stage2Name) {
-      // Переход к stage2 после stage1: полный ввод CHANNEL_TARGET_NAME и Enter.
-      await input.waitFor({ state: "visible", timeout: 30_000 });
-      await moveCursorAndClickToFocus(page, input, headless);
-      await clearFocusedField(page);
-      if (useNutKb) {
-        await typeTextWithNut(stage2Name, { typoRatio });
-      } else {
-        await typeTextWithPlaywright(page, stage2Name, { typoRatio });
+    if (runStage2) {
+      if (headless) {
+        throw new Error("stage2: only headed mode is supported (nut.js real-user actions).");
       }
-      await pressEnterAfterTyping(page, useNutKb);
-      await sleep(randFloat(1000, 3000));
-    }
-
-    if (channelMode && channelTargetHref) {
-      await sleep(randFloat(350, 900));
-      const res = await scrollFindChannelHrefOrFallbackSearch({
-        page,
-        input,
-        targetHref: channelTargetHref,
-        useNutKeyboard: useNutKb,
-        typoRatio,
+      const stage2UseNutKb = true;
+      const chosenVariant = resolveStage2Variant({
+        stage2Name,
+        channelTargetHref,
+        videoTargetHref,
+        videoTargetName,
       });
-      console.log(`[stage2] channel href result: ${res}`);
-    }
+      console.log(`[stage2] chosen flow: ${chosenVariant}`);
 
-    if (runStage2 && videoTargetHref) {
-      const r = await stage2ClickVideosAndOpenVideoByHref(page, videoTargetHref);
-      console.log(`[stage2] video href result: ${r}`);
+      const runChosenVariant = async (): Promise<void> => {
+        if (chosenVariant === "variant1") {
+          if (stage2Name) {
+            await input.waitFor({ state: "visible", timeout: 30_000 });
+            await moveCursorAndClickToFocus(page, input, headless);
+            await clearFocusedField(page);
+            await typeTextWithNut(stage2Name, { typoRatio });
+            await pressEnterAfterTyping(page, stage2UseNutKb);
+            await sleep(randFloat(1000, 3000));
+          }
+          if (channelMode && channelTargetHref) {
+            await sleep(randFloat(350, 900));
+            const res = await scrollFindChannelHrefOrFallbackSearch({
+              page,
+              input,
+              targetHref: channelTargetHref,
+              useNutKeyboard: useNutKb,
+              typoRatio,
+            });
+            console.log(`[stage2] channel href result: ${res}`);
+          }
+          if (videoTargetHref) {
+            const r = await stage2ClickVideosAndOpenVideoByHref(page, videoTargetHref);
+            console.log(`[stage2] video href result: ${r}`);
+          }
+          return;
+        }
+
+        if (chosenVariant === "variant2") {
+          if (!stage2Name) {
+            throw new Error("stage2 variant2: CHANNEL_TARGET_NAME is empty");
+          }
+          const query = `"${stage2Name}" site:youtube.com`;
+          await nutSearchFromAddressBar(query);
+          const clicked = await findAndClickVisibleSearchLink(page, {
+            hrefNeedle: channelTargetHref,
+            textNeedle: stage2Name,
+            timeoutMs: Math.round(randFloat(12_000, 24_000)),
+          });
+          if (!clicked && channelTargetHref) {
+            await nutSearchFromAddressBar(channelTargetHref);
+          }
+          await page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
+          if (videoTargetHref) {
+            const r = await stage2ClickVideosAndOpenVideoByHref(page, videoTargetHref);
+            console.log(`[stage2] video href result: ${r}`);
+          }
+          return;
+        }
+
+        if (chosenVariant === "variant3") {
+          const queryBase = videoTargetName || videoTargetHref || "";
+          if (!queryBase) {
+            throw new Error("stage2 variant3: VIDEO_TARGET_NAME/VIDEO_TARGET_HREF is empty");
+          }
+          const query = `"${queryBase}" site:youtube.com`;
+          await nutSearchFromAddressBar(query);
+          const clicked = await findAndClickVisibleSearchLink(page, {
+            hrefNeedle: videoTargetHref,
+            textNeedle: videoTargetName,
+            timeoutMs: Math.round(randFloat(12_000, 26_000)),
+          });
+          if (!clicked && videoTargetHref) {
+            await nutSearchFromAddressBar(videoTargetHref);
+          }
+          await page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
+          return;
+        }
+
+        await stage2Variant4DirectNavigate({
+          page,
+          channelTargetHref,
+          videoTargetHref,
+        });
+      };
+
+      try {
+        const timeoutMs = stage2TimeoutMs();
+        await Promise.race([
+          runChosenVariant(),
+          new Promise<never>((_, reject) => {
+            setTimeout(() => reject(new Error(`stage2 variant timeout ${timeoutMs}ms`)), timeoutMs);
+          }),
+        ]);
+
+        if (await hasCaptchaOrVerification(page)) {
+          throw new Error("captcha/verification detected");
+        }
+      } catch (e) {
+        console.warn("[stage2] variant failed, switching to variant4 direct link:", e);
+        await stage2Variant4DirectNavigate({
+          page,
+          channelTargetHref,
+          videoTargetHref,
+        });
+      }
     }
     if (runStage2) {
       await reportTeamTaskStatus(taskId, "completed");

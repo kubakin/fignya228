@@ -1,10 +1,18 @@
 /**
  * Worker mode:
- * - polls task endpoint every 5 minutes (when idle);
+ * - polls task endpoint (when idle);
  * - starts existing `fill` flow with env built from task payload.
  *
  * Required env for worker:
  *   TARGET_URL=<task endpoint URL>
+ *
+ * Task JSON → env (see buildTaskEnv):
+ *   youtubeVideoUrl → VIDEO_TARGET_HREF
+ *   youtubeChannelUrl → CHANNEL_TARGET_HREF
+ *   youtubeChannelName → CHANNEL_TARGET_NAME
+ *   youtubeChannelDescription / youtubeChanngelDescription → TEXT (stage1 search)
+ *   youtubeVideoDescription → VIDEO_TARGET_NAME (optional) + TEXT fallback
+ *   teamApiKey → TEAM_API_KEY
  *
  * Optional:
  *   TASK_POLL_INTERVAL_MS=120000
@@ -19,10 +27,17 @@ import { spawn } from "node:child_process";
 loadEnv({ path: resolve(process.cwd(), ".env") });
 
 type TaskPayload = {
+  hasTask?: boolean;
   taskId?: string;
+  /** Server typo; some responses use this instead of taskId */
+  tastId?: string;
+  teamApiKey?: string;
   youtubeVideoUrl?: string;
   youtubeChannelUrl?: string;
   youtubeChannelName?: string;
+  /** Stage1 search query: channel / project description (preferred). */
+  youtubeChannelDescription?: string;
+  /** Legacy typo in API DTO */
   youtubeChanngelDescription?: string;
   youtubeVideoDescription?: string;
   config?: Record<string, unknown>;
@@ -48,7 +63,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function taskIdOf(task: TaskPayload): string {
-  return (task.taskId ?? "").trim();
+  return (task.taskId ?? task.tastId ?? "").trim();
 }
 
 async function fetchTask(): Promise<TaskPayload | null> {
@@ -69,6 +84,7 @@ async function fetchTask(): Promise<TaskPayload | null> {
   if (!body || typeof body !== "object") return null;
 
   const obj = body as Record<string, unknown>;
+  if (obj.hasTask === false) return null;
   if (obj.task === null || obj.task === undefined) {
     // server may return {task: null}
     if ("task" in obj) return null;
@@ -79,7 +95,12 @@ async function fetchTask(): Promise<TaskPayload | null> {
   // 2) { task: {...} }
   // 3) { data: {...} }
   const direct = body as TaskPayload;
-  if (direct.taskId || direct.youtubeVideoUrl || direct.youtubeChannelUrl) {
+  if (
+    direct.taskId ||
+    direct.tastId ||
+    direct.youtubeVideoUrl ||
+    direct.youtubeChannelUrl
+  ) {
     return direct;
   }
   if (obj.task && typeof obj.task === "object") return obj.task as TaskPayload;
@@ -209,18 +230,30 @@ function toEnvStringMap(config: Record<string, unknown> | undefined): Record<str
 function buildTaskEnv(task: TaskPayload): Record<string, string> {
   const cfg = toEnvStringMap(task.config);
   const out: Record<string, string> = { ...cfg };
-  console.log(out)
-  // map task fields to current automation env keys (config can override these later)
+  // Task DTO → fill env:
+  // - youtubeVideoUrl → VIDEO_TARGET_HREF (target watch URL / fallback / video search)
+  // - youtubeChannelUrl → CHANNEL_TARGET_HREF
+  // - youtubeChannelDescription (or typo youtubeChanngelDescription) → TEXT (stage1 search query)
   if (task.youtubeChannelUrl) out.CHANNEL_TARGET_HREF = task.youtubeChannelUrl;
   if (task.youtubeChannelName) out.CHANNEL_TARGET_NAME = task.youtubeChannelName;
   if (task.youtubeVideoUrl) out.VIDEO_TARGET_HREF = task.youtubeVideoUrl;
+  if (task.youtubeVideoDescription && !out.VIDEO_TARGET_NAME) {
+    out.VIDEO_TARGET_NAME = task.youtubeVideoDescription;
+  }
+  if (task.teamApiKey && !out.TEAM_API_KEY) {
+    out.TEAM_API_KEY = task.teamApiKey;
+  }
 
-  // stage1 search text fallback from task payload if config/TEXT not provided
+  // Stage1 search text: channel/project description, not video title (unless config sets TEXT)
   if (!out.TEXT) {
+    const channelDesc =
+      task.youtubeChannelDescription?.trim() ||
+      task.youtubeChanngelDescription?.trim() ||
+      "";
     out.TEXT =
-      task.youtubeVideoDescription ??
-      task.youtubeChanngelDescription ??
-      task.youtubeChannelName ??
+      channelDesc ||
+      task.youtubeChannelName?.trim() ||
+      task.youtubeVideoDescription?.trim() ||
       "";
   }
 
