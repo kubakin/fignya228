@@ -27,6 +27,13 @@ function Ensure-NodePathHint {
   }
 }
 
+function Invoke-AndEnsureSuccess([scriptblock]$Command, [string]$ErrorMessage) {
+  & $Command
+  if ($LASTEXITCODE -ne 0) {
+    throw "$ErrorMessage (exit code: $LASTEXITCODE)"
+  }
+}
+
 function Test-CdpEndpoint([int]$port) {
   try {
     $null = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/json/version" -TimeoutSec 2
@@ -126,18 +133,22 @@ try {
   if (-not $SkipDependenciesInstall) {
     if (Test-Path "package-lock.json") {
       Write-Step "Installing dependencies: npm ci"
-      npm ci
+      Invoke-AndEnsureSuccess { npm ci } "Dependency install failed (npm ci)"
     } else {
       Write-Step "Installing dependencies: npm install"
-      npm install
+      Invoke-AndEnsureSuccess { npm install } "Dependency install failed (npm install)"
     }
   } else {
     Write-Step "Skipping dependencies install"
+    $tsxBin = Join-Path $PSScriptRoot "node_modules\.bin\tsx.cmd"
+    if (-not (Test-Path $tsxBin)) {
+      throw "tsx not found (node_modules is missing or incomplete). Run without -SkipDependenciesInstall once."
+    }
   }
 
   if (-not $SkipBrowserInstall) {
     Write-Step "Installing Playwright Chromium"
-    npx playwright install chromium
+    Invoke-AndEnsureSuccess { npx playwright install chromium } "Playwright browser install failed"
   }
 
   $chromeProc = $null
@@ -149,7 +160,7 @@ try {
   }
 
   Write-Step "Running npm run $ScriptName"
-  npm run $ScriptName
+  Invoke-AndEnsureSuccess { npm run $ScriptName } "Script failed: npm run $ScriptName"
 
   if ($chromeProc -and -not $KeepChromeOpen) {
     try { Stop-Process -Id $chromeProc.Id -Force -ErrorAction SilentlyContinue } catch {}
