@@ -228,8 +228,10 @@ async function reportTeamTaskStatus(
   status: TeamTaskStatus
 ): Promise<void> {
   if (!taskId || taskId.trim().length === 0) return;
+  const reportUrl =
+    process.env.TARGET_URL?.trim() || "http://localhost:3000/team/task";
   try {
-    const resp = await fetch("http://localhost:3000/team/task", {
+    const resp = await fetch(reportUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
