@@ -84,7 +84,7 @@ async function fetchTask(): Promise<TaskPayload | null> {
   }
   const body = (await resp.json()) as unknown;
   if (!body || typeof body !== "object") return null;
-
+  console.log(body)
   const obj = body as Record<string, unknown>;
   if (obj.hasTask === false) return null;
   if (obj.task === null || obj.task === undefined) {

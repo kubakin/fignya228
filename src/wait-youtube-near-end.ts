@@ -1,6 +1,8 @@
 /**
  * Ожидание, пока основной HTML5‑плеер на странице watch не дойдёт до доли
  * длительности в интервале [VIDEO_END_MIN_RATIO, VIDEO_END_MAX_RATIO] (по умолчанию 0.9–1.0).
+ * Для второго этапа можно передать `ratioMin` / `ratioMax` (например 0.8–1.0) и
+ * `ignoreVideoWatchSecLimits: true`, чтобы не смешивать с лимитами stage1 (VIDEO_WATCH_*_SEC).
  *
  * В консоль (console.debug, префикс `[yt-worker:video]`): этапы watch, метаданные плеера,
  * периодический «прогресс» во время ожидания (~каждые 2.5 с), финальный снимок.
@@ -250,9 +252,7 @@ function isWatchUrl(url: string): boolean {
 /**
  * Случайная целевая доля от 0 до 1 в пределах [lo, hi].
  */
-function targetRatio(): number {
-  const minR = envRatio("VIDEO_END_MIN_RATIO", 0.9);
-  const maxR = envRatio("VIDEO_END_MAX_RATIO", 1);
+function randomTargetRatioInRange(minR: number, maxR: number): number {
   const lo = Math.min(minR, maxR);
   const hi = Math.max(minR, maxR);
   const clampedLo = Math.max(0, Math.min(1, lo));
@@ -267,8 +267,15 @@ function envWatchSec(name: string): number | undefined {
   return v;
 }
 
-function resolveTargetWatchSec(durationSec: number, ratio: number): number {
+function resolveTargetWatchSec(
+  durationSec: number,
+  ratio: number,
+  ignoreVideoWatchLimits?: boolean
+): number {
   const byRatio = durationSec * ratio;
+  if (ignoreVideoWatchLimits) {
+    return Math.max(0, Math.min(durationSec - 0.5, byRatio));
+  }
   const minSecRaw = envWatchSec("VIDEO_WATCH_MIN_SEC");
   const maxSecRaw = envWatchSec("VIDEO_WATCH_MAX_SEC");
 
@@ -286,18 +293,36 @@ function resolveTargetWatchSec(durationSec: number, ratio: number): number {
   return Math.max(0, Math.min(durationSec - 0.5, byRatio));
 }
 
+export type WaitYoutubeNearEndOptions = {
+  /** По умолчанию из VIDEO_END_MIN_RATIO (или 0.9). */
+  ratioMin?: number;
+  /** По умолчанию из VIDEO_END_MAX_RATIO (или 1). */
+  ratioMax?: number;
+  /**
+   * Если true — не применять VIDEO_WATCH_MIN_SEC / VIDEO_WATCH_MAX_SEC,
+   * целевое время только из случайной доли в [ratioMin, ratioMax].
+   */
+  ignoreVideoWatchSecLimits?: boolean;
+};
+
 /**
  * Если открыта страница просмотра YouTube — ждём готовности `video`, при необходимости
  * запускаем воспроизведение и ждём, пока currentTime/duration не достигнет целевой доли.
  */
-export async function waitForYoutubeVideoNearEndIfWatch(page: Page): Promise<boolean> {
+export async function waitForYoutubeVideoNearEndIfWatch(
+  page: Page,
+  opts?: WaitYoutubeNearEndOptions
+): Promise<boolean> {
   try {
     await page.waitForURL(/youtube\.com\/watch\?v=/, { timeout: 60_000 });
   } catch {
     if (!isWatchUrl(page.url())) return false;
   }
 
-  const target = targetRatio();
+  const minR = opts?.ratioMin ?? envRatio("VIDEO_END_MIN_RATIO", 0.9);
+  const maxR = opts?.ratioMax ?? envRatio("VIDEO_END_MAX_RATIO", 1);
+  const target = randomTargetRatioInRange(minR, maxR);
+  const ignoreVideoWatchLimits = opts?.ignoreVideoWatchSecLimits === true;
   const timeoutMs = envTimeoutMs();
   let lastKnownRatio = 0;
   let targetWatchSec: number | null = null;
@@ -324,7 +349,11 @@ export async function waitForYoutubeVideoNearEndIfWatch(page: Page): Promise<boo
       snapReady.duration > 0
     ) {
       if (targetWatchSec === null) {
-        targetWatchSec = resolveTargetWatchSec(snapReady.duration, target);
+        targetWatchSec = resolveTargetWatchSec(
+          snapReady.duration,
+          target,
+          ignoreVideoWatchLimits
+        );
       }
       const r = snapReady.currentTime / snapReady.duration;
       if (Number.isFinite(r) && r >= 0) lastKnownRatio = Math.max(lastKnownRatio, r);
@@ -355,7 +384,11 @@ export async function waitForYoutubeVideoNearEndIfWatch(page: Page): Promise<boo
     if (targetWatchSec === null) {
       const s = await page.evaluate(evalVideoSnapshot);
       if (s && Number.isFinite(s.duration) && s.duration > 0) {
-        targetWatchSec = resolveTargetWatchSec(s.duration, target);
+        targetWatchSec = resolveTargetWatchSec(
+          s.duration,
+          target,
+          ignoreVideoWatchLimits
+        );
       }
     }
 

@@ -45,7 +45,8 @@
  *     VIDEO_TARGET_HREF=https://www.youtube.com/watch?v=... — какое видео открыть;
  *     VIDEO_FIND_TIMEOUT_MS_MIN, VIDEO_FIND_TIMEOUT_MS_MAX — окно ожидания (мс), по умолчанию 15000–20000;
  *     вкладка выбирается строго по тексту: «Видео» или «Videos».
- *   после клика по заголовку на watch: ожидание прогресса плеера VIDEO_END_MIN_RATIO–VIDEO_END_MAX_RATIO (по умолчанию 0.9–1.0),
+ *   после клика по заголовку на watch (stage1): ожидание прогресса плеера VIDEO_END_MIN_RATIO–VIDEO_END_MAX_RATIO (по умолчанию 0.9–1.0);
+ *   stage2: успех и отчёт completed после просмотра в доле STAGE2_VIDEO_END_MIN–MAX (или, если не заданы, VIDEO_END_MIN_RATIO–VIDEO_END_MAX_RATIO из config/.env; по умолчанию 0.8–1.0);
  *     затем в консоль: hello world; VIDEO_NEAR_END_TIMEOUT_MS — лимит ожидания (мс), 0 = без лимита;
  *     VIDEO_PROGRESS_INTERVAL_MS — интервал лога «прогресс» (мс), по умолчанию 2500, минимум 500
  *   Свой браузер / аккаунты:
@@ -77,7 +78,10 @@ import {
   shouldRunNutScroll,
 } from "./human-scroll.js";
 import { dedupeConsecutive, humanLikePath, randFloat } from "./mouse-path.js";
-import { nutHumanMoveAndClick } from "./nut-move-click.js";
+import {
+  nutHumanMoveAndClick,
+  nutHumanMoveAndClickScreenPoint,
+} from "./nut-move-click.js";
 import { waitForYoutubeVideoNearEndIfWatch } from "./wait-youtube-near-end.js";
 import { createBrowserSession } from "./browser-session.js";
 import { scrollFindChannelHrefOrFallbackSearch } from "./channel-scroll-find.js";
@@ -257,6 +261,26 @@ async function reportTeamTaskStatus(
 type SidebarPick = { selector: string; idx: number } | null;
 type Stage2Variant = "variant1" | "variant2" | "variant3" | "variant4";
 
+/** Stage2 «досмотр»: STAGE2_VIDEO_END_MIN_RATIO или короткий алиас STAGE2_VIDEO_END_MIN, затем VIDEO_END_MIN_RATIO. */
+function resolveStage2VideoEndRatios(): { min: number; max: number } {
+  const minStr =
+    process.env.STAGE2_VIDEO_END_MIN_RATIO?.trim() ||
+    process.env.STAGE2_VIDEO_END_MIN?.trim() ||
+    process.env.VIDEO_END_MIN_RATIO?.trim() ||
+    "";
+  const maxStr =
+    process.env.STAGE2_VIDEO_END_MAX_RATIO?.trim() ||
+    process.env.STAGE2_VIDEO_END_MAX?.trim() ||
+    process.env.VIDEO_END_MAX_RATIO?.trim() ||
+    "";
+  const minN = minStr !== "" ? Number(minStr) : NaN;
+  const maxN = maxStr !== "" ? Number(maxStr) : NaN;
+  return {
+    min: Number.isFinite(minN) ? minN : 0.8,
+    max: Number.isFinite(maxN) ? maxN : 1.0,
+  };
+}
+
 async function pickRandomVisibleSidebarVideo(page: Page): Promise<SidebarPick> {
   const selectors = [
     "a.ytLockupMetadataViewModelTitle",
@@ -397,42 +421,138 @@ async function stage2Variant4DirectNavigate(opts: {
   await ensureVideoPlayingIfPaused(opts.page);
 }
 
-async function ensureVideoPlayingIfPaused(page: Page): Promise<void> {
-  const snap = await page.evaluate(() => {
+/**
+ * Screen pixel for a reliable play interaction: overlay play control or lower player area.
+ * Avoids clicking the first <video> in DOM (can be wrong/hidden and send cursor off-screen).
+ */
+async function resolveYoutubePlaybackClickScreenPx(
+  page: Page
+): Promise<{ x: number; y: number } | null> {
+  // Одна function без вложенных хелперов — иначе esbuild/tsx подставляет __name в evaluate и падает в браузере.
+  return page.evaluate(function () {
+    const chromeTop = window.outerHeight - window.innerHeight;
+    const chromeLeft = window.outerWidth - window.innerWidth;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const playSelectors = [
+      ".ytp-play-button",
+      ".ytp-large-play-button",
+      "button.ytp-play-button",
+      ".ytp-cued-thumbnail-overlay",
+    ];
+    let i: number;
+    let el: Element | null;
+    let r: DOMRect;
+    let lx: number;
+    let ly: number;
+    for (i = 0; i < playSelectors.length; i++) {
+      el = document.querySelector(playSelectors[i]!);
+      if (!el) continue;
+      r = el.getBoundingClientRect();
+      if (r.width < 4 || r.height < 4) continue;
+      lx = r.left + r.width / 2;
+      ly = r.top + r.height / 2;
+      if (lx < 0 || ly < 0 || lx > vw || ly > vh) continue;
+      return {
+        x: Math.round(window.screenX + chromeLeft / 2 + lx),
+        y: Math.round(window.screenY + chromeTop + ly),
+      };
+    }
+    el =
+      document.querySelector("#movie_player") ??
+      document.querySelector("ytd-player#player") ??
+      document.querySelector("ytd-player");
+    if (el) {
+      r = el.getBoundingClientRect();
+      if (r.width > 20 && r.height > 20) {
+        lx = r.left + r.width / 2;
+        ly = r.top + Math.min(r.height * 0.58, r.height - 28);
+        if (lx >= 0 && ly >= 0 && lx <= vw && ly <= vh) {
+          return {
+            x: Math.round(window.screenX + chromeLeft / 2 + lx),
+            y: Math.round(window.screenY + chromeTop + ly),
+          };
+        }
+      }
+    }
+    lx = vw / 2;
+    ly = vh * 0.48;
+    return {
+      x: Math.round(window.screenX + chromeLeft / 2 + lx),
+      y: Math.round(window.screenY + chromeTop + ly),
+    };
+  });
+}
+
+async function evalMainVideoPaused(page: Page): Promise<boolean | null> {
+  return page.evaluate(function () {
     const v =
       document.querySelector("ytd-player video") ??
       document.querySelector("#movie_player video") ??
       document.querySelector("video");
-    if (!v) return { hasVideo: false, paused: false };
-    const vv = v as HTMLVideoElement;
-    return { hasVideo: true, paused: vv.paused };
+    if (!v) return null;
+    return (v as HTMLVideoElement).paused;
   });
+}
 
-  if (!snap.hasVideo) return;
-  if (!snap.paused) return;
+async function ensureVideoPlayingIfPaused(page: Page): Promise<void> {
+  await sleep(randFloat(500, 1100));
 
-  console.log("[stage2] variant4: video is paused, trying to start playback");
-  const video = page.locator("#movie_player video, ytd-player video, video").first();
-  try {
-    await video.waitFor({ state: "visible", timeout: 7000 });
-    await nutHumanMoveAndClick(video);
-    await sleep(randFloat(180, 360));
-    await keyboard.type("k");
-    await sleep(randFloat(300, 700));
-  } catch {
-    // Fallback: try hotkey only.
-    await keyboard.type("k");
-    await sleep(randFloat(300, 700));
+  let paused = await evalMainVideoPaused(page);
+  if (paused === null) return;
+  if (!paused) return;
+
+  console.log("[stage2] variant4: video is paused, starting playback (nut.js)");
+
+  keyboard.config.autoDelayMs = 0;
+
+  const tryHotkeys = async (): Promise<void> => {
+    if ((await evalMainVideoPaused(page)) !== true) return;
+    await sleep(randFloat(120, 280));
+    await keyboard.type(" ");
+    await sleep(randFloat(280, 520));
+    if ((await evalMainVideoPaused(page)) !== true) return;
+    await sleep(randFloat(80, 200));
+    await keyboard.type(Key.K);
+    await sleep(randFloat(280, 520));
+  };
+
+  for (let attempt = 0; attempt < 3 && paused === true; attempt++) {
+    const pt = await resolveYoutubePlaybackClickScreenPx(page);
+    if (pt) {
+      try {
+        await nutHumanMoveAndClickScreenPoint(pt.x, pt.y);
+        await sleep(randFloat(220, 480));
+      } catch (e) {
+        console.warn("[stage2] variant4: mouse click failed, trying keys only:", e);
+      }
+    }
+
+    await tryHotkeys();
+    paused = await evalMainVideoPaused(page);
+    if (paused === null || paused === false) break;
   }
 
-  const after = await page.evaluate(() => {
-    const v =
-      document.querySelector("ytd-player video") ??
-      document.querySelector("#movie_player video") ??
-      document.querySelector("video");
-    return v ? !(v as HTMLVideoElement).paused : true;
-  });
-  console.log(`[stage2] variant4: playback active=${after}`);
+  const playBtn = page.locator(".ytp-play-button, .ytp-large-play-button").first();
+  try {
+    if ((await evalMainVideoPaused(page)) === true) {
+      await playBtn.waitFor({ state: "visible", timeout: 2500 });
+      await nutHumanMoveAndClick(playBtn);
+      await sleep(randFloat(300, 600));
+    }
+  } catch {
+    // ignore
+  }
+
+  if ((await evalMainVideoPaused(page)) === true) {
+    await tryHotkeys();
+  }
+
+  const after = await evalMainVideoPaused(page);
+  const playing = after === false;
+  console.log(
+    `[stage2] variant4: video playing=${playing}${after === null ? " (no <video>)" : ""}`
+  );
 }
 
 async function findAndClickVisibleSearchLink(page: Page, opts: {
@@ -724,12 +844,30 @@ async function main(): Promise<void> {
         });
       }
     }
+
+    /** Stage2: досмотр до случайной доли в [min,max] (см. resolveStage2VideoEndRatios). */
+    let stage2WatchOk = false;
     if (runStage2) {
+      const { min: minR, max: maxR } = resolveStage2VideoEndRatios();
+      console.log(
+        `[stage2] target watch ratio range: ${minR}..${maxR} (STAGE2_VIDEO_END_MIN[_RATIO] / MAX[_RATIO] or VIDEO_END_*)`
+      );
+      stage2WatchOk = await waitForYoutubeVideoNearEndIfWatch(page, {
+        ratioMin: minR,
+        ratioMax: maxR,
+        ignoreVideoWatchSecLimits: true,
+      });
+    }
+    if (runStage2 && stage2WatchOk) {
       await reportTeamTaskStatus(taskId, "completed");
+    } else if (runStage2 && !stage2WatchOk) {
+      console.warn(
+        "[stage2] целевой просмотр по заданным VIDEO_END_/STAGE2_VIDEO_END_ долям не достигнут — completed не отправляем"
+      );
     }
 
     //не убирать! (пауза перед закрытием, если не ждали конец ролика)
-    if (!videoNearEndDone) {
+    if (!videoNearEndDone && !(runStage2 && stage2WatchOk)) {
       await page.waitForTimeout(15000);
     }
     console.log(`Введено "${text}" в ${selector} на ${url}`);
