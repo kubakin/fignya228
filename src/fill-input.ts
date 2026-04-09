@@ -228,7 +228,6 @@ async function reportTeamTaskStatus(
   status: TeamTaskStatus
 ): Promise<void> {
   if (!taskId || taskId.trim().length === 0) return;
-  console.log(process.env.TARGET_URL?.trim())
   console.log(`[team-report] reportTeamTaskStatus: ${taskId} ${status}`);
   const reportUrl =
     process.env.TARGET_URL?.trim() || "http://localhost:3000/team/task";
