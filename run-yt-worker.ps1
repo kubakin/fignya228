@@ -22,10 +22,10 @@ function Ensure-Node {
     return
   }
 
-  Write-Step "Node.js/npm не найдены. Пытаюсь установить Node.js LTS через winget..."
+  Write-Step "Node.js/npm not found. Installing Node.js LTS via winget..."
   $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
   if (-not $wingetCmd) {
-    throw "winget не найден. Установите Node.js LTS вручную: https://nodejs.org/ и запустите скрипт снова."
+    throw "winget not found. Install Node.js LTS manually from https://nodejs.org/ and run again."
   }
 
   & winget install --id OpenJS.NodeJS.LTS --exact --accept-package-agreements --accept-source-agreements
@@ -34,13 +34,13 @@ function Ensure-Node {
   $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
   $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
   if (-not $nodeCmd -or -not $npmCmd) {
-    throw "Node.js/npm не обнаружены после установки. Перезапустите PowerShell и попробуйте снова."
+    throw "Node.js/npm not found after install. Restart PowerShell and try again."
   }
 }
 
 try {
   Set-Location -Path $PSScriptRoot
-  Write-Step "Рабочая папка: $PSScriptRoot"
+  Write-Step "Working directory: $PSScriptRoot"
 
   Ensure-Node
 
@@ -48,24 +48,24 @@ try {
   Write-Step "npm: $(npm -v)"
 
   if (Test-Path "package-lock.json") {
-    Write-Step "Устанавливаю зависимости: npm ci"
+    Write-Step "Installing dependencies: npm ci"
     npm ci
   } else {
-    Write-Step "Устанавливаю зависимости: npm install"
+    Write-Step "Installing dependencies: npm install"
     npm install
   }
 
   if (-not $SkipBrowserInstall) {
-    Write-Step "Устанавливаю Chromium для Playwright"
+    Write-Step "Installing Playwright Chromium"
     npx playwright install chromium
   }
 
-  Write-Step "Запускаю npm run $ScriptName"
+  Write-Step "Running npm run $ScriptName"
   npm run $ScriptName
 
-  Write-Host "[run-yt-worker] Готово." -ForegroundColor Green
+  Write-Host "[run-yt-worker] Done." -ForegroundColor Green
 } catch {
-  Write-Host "[run-yt-worker] Ошибка: $($_.Exception.Message)" -ForegroundColor Red
+  Write-Host "[run-yt-worker] Error: $($_.Exception.Message)" -ForegroundColor Red
   exit 1
 }
 
