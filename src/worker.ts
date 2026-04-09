@@ -157,7 +157,7 @@ async function runFillForTask(task: TaskPayload): Promise<number> {
 
 async function main(): Promise<void> {
   const endpoint = 'https://youtube.com'
-  
+  console.log(process.env.TARGET_URL?.trim())
 
   const pollMs = envPollIntervalMs();
   console.log(`[worker] started, endpoint=${endpoint}, poll=${pollMs}ms`);
