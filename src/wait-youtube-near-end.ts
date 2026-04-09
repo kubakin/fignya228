@@ -202,6 +202,15 @@ function evalHasYtPlaybackErrorOverlay(): boolean {
   );
 }
 
+/** Активен ли рекламный режим YouTube-плеера. */
+function evalIsAdShowing(): boolean {
+  const player = document.querySelector("#movie_player");
+  if (player && (player as Element).classList.contains("ad-showing")) return true;
+  const adText = (document.querySelector(".ytp-ad-text") as HTMLElement | null)?.innerText || "";
+  if (adText.trim().length > 0) return true;
+  return false;
+}
+
 /** Снимок плеера для логов (выполняется в браузере). */
 function evalVideoSnapshot(): {
   currentTime: number;
@@ -309,11 +318,14 @@ export async function waitForYoutubeVideoNearEndIfWatch(page: Page): Promise<boo
 
     const tickMs = progressTickIntervalMs();
     const logProgressSnapshot = (): void => {
-      void page.evaluate(evalVideoSnapshot).then((s) => {
+      void Promise.all([
+        page.evaluate(evalVideoSnapshot),
+        page.evaluate(evalIsAdShowing),
+      ]).then(([s, isAd]) => {
         if (!s || !Number.isFinite(s.duration) || s.duration <= 0) return;
         const pct = (s.currentTime / s.duration) * 100;
         const rr = s.currentTime / s.duration;
-        if (Number.isFinite(rr) && rr >= 0) {
+        if (!isAd && Number.isFinite(rr) && rr >= 0) {
           lastKnownRatio = Math.max(lastKnownRatio, rr);
         }
         videoLog("прогресс", {
@@ -321,6 +333,7 @@ export async function waitForYoutubeVideoNearEndIfWatch(page: Page): Promise<boo
           durationSec: Number(s.duration.toFixed(2)),
           percent: Number(pct.toFixed(2)),
           paused: s.paused,
+          ad: isAd,
           needPercent: Number((target * 100).toFixed(2)),
         });
       });
@@ -331,6 +344,10 @@ export async function waitForYoutubeVideoNearEndIfWatch(page: Page): Promise<boo
     try {
       await page.waitForFunction(
         function ({ ratio }: { ratio: number }) {
+          const player = document.querySelector("#movie_player");
+          if (player && (player as Element).classList.contains("ad-showing")) {
+            return false;
+          }
           const root = document.querySelector("#movie_player") ?? document;
           const text = (root.textContent || "").toLowerCase();
           if (

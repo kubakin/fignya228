@@ -17,6 +17,22 @@ function envTrim(name: string): string | undefined {
   return v === undefined || v === "" ? undefined : v;
 }
 
+async function closeChromeServiceTabs(page: Page): Promise<void> {
+  const url = page.url().toLowerCase();
+  const isService =
+    url.startsWith("chrome://") ||
+    url.startsWith("edge://") ||
+    url.includes("whats-new") ||
+    url.includes("/chrome/") ||
+    url.includes("settings/help");
+  if (!isService) return;
+  try {
+    await page.close({ runBeforeUnload: false });
+  } catch {
+    // ignore
+  }
+}
+
 /**
  * Открывает страницу: либо новая вкладка в подключённом/постоянном контексте (общие cookie с профилем).
  */
@@ -32,6 +48,10 @@ export async function createBrowserSession(
       throw new Error(
         "CDP: у браузера нет контекста. Запустите Chrome с --remote-debugging-port=..."
       );
+    }
+    const existing = context.pages();
+    for (const p of existing) {
+      await closeChromeServiceTabs(p);
     }
     const page = await context.newPage();
     return {

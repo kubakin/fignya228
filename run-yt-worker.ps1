@@ -80,6 +80,14 @@ function Start-ChromeForProfile {
   $args = @(
     "--remote-debugging-port=$Port",
     "--user-data-dir=$UserDataDir",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-default-apps",
+    "--disable-notifications",
+    "--disable-features=ChromeWhatsNewUI,DesktopPWAsDefaultOff,DesktopPWAsTabStrip",
+    "--disable-component-update",
+    "--disable-sync",
+    "--disable-background-networking",
     "--new-window",
     "https://www.youtube.com"
   )
