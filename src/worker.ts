@@ -26,6 +26,11 @@ type TaskPayload = {
   config?: Record<string, unknown>;
 };
 
+function envWorkerScript(): string {
+  const s = process.env.WORKER_RUN_SCRIPT?.trim();
+  return s && s.length > 0 ? s : "fill";
+}
+
 function envPollIntervalMs(): number {
   const n = Number(process.env.TASK_POLL_INTERVAL_MS ?? 300_000);
   return Number.isFinite(n) && n >= 5_000 ? Math.floor(n) : 300_000;
@@ -76,6 +81,11 @@ function toEnvStringMap(config: Record<string, unknown> | undefined): Record<str
   if (!config) return out;
   for (const [k, v] of Object.entries(config)) {
     if (v === undefined || v === null) continue;
+    // Windows child_process can throw EINVAL on invalid env keys.
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
+      console.warn(`[worker] skip invalid env key from config: ${k}`);
+      continue;
+    }
     out[k] = String(v);
   }
   return out;
@@ -113,21 +123,36 @@ async function runFillForTask(task: TaskPayload): Promise<number> {
     console.error("[worker] task skipped: missing taskId in payload");
     return 1;
   }
+  const runScript = envWorkerScript();
   console.log(`[worker] starting task ${id}`);
 
-  const cmd = process.platform === "win32" ? "npm.cmd" : "npm";
-  const child = spawn(cmd, ["run", "fill"], {
-    cwd: process.cwd(),
-    env: { ...process.env, ...taskEnv, TASK_ID: id },
-    stdio: "inherit",
-  });
+  const safeEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries({ ...process.env, ...taskEnv, TASK_ID: id })) {
+    if (v === undefined || v === null) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
+    safeEnv[k] = String(v);
+  }
+
+  const child =
+    process.platform === "win32"
+      ? spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `npm run ${runScript}`], {
+          cwd: process.cwd(),
+          env: safeEnv,
+          stdio: "inherit",
+          windowsHide: true,
+        })
+      : spawn("npm", ["run", runScript], {
+          cwd: process.cwd(),
+          env: safeEnv,
+          stdio: "inherit",
+        });
 
   const exitCode = await new Promise<number>((resolveExit) => {
     child.on("exit", (code) => resolveExit(code ?? 1));
     child.on("error", () => resolveExit(1));
   });
 
-  console.log(`[worker] task ${id} finished with code ${exitCode}`);
+  console.log(`[worker] task ${id} finished with code ${exitCode} (script=${runScript})`);
   return exitCode;
 }
 
