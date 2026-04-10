@@ -1,7 +1,6 @@
 /**
  * YouTube: после поиска/загрузки результатов скроллить вниз и искать ссылку канала по href.
- * Если не найдено за 10–20 секунд — открыть href в адресной строке «как вставкой» и Enter
- * (в headless: page.goto()).
+ * Если не найдено за 10–20 секунд — открыть href в адресной строке «как вставкой» и Enter.
  */
 
 import { keyboard, mouse, sleep, straightTo } from "@nut-tree-fork/nut-js";
@@ -140,13 +139,7 @@ export async function scrollFindChannelHrefOrFallbackSearch(opts: {
   page: Page;
   input: Locator;
   targetHref: string;
-  useNutKeyboard: boolean;
-  typoRatio: number;
 }): Promise<"clicked" | "fallback-navigated"> {
-  // Этот этап требуется «как пользователь» (системный скролл/клики).
-  if ((process.env.HEADLESS ?? "").trim().toLowerCase() === "true") {
-    throw new Error("stage2: headless не поддерживается (нужен системный скролл/клики nut.js).");
-  }
   const deadlineMs = resolveDeadlineMs();
   const startedAt = Date.now();
 

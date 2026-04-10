@@ -25,11 +25,18 @@ import { config as loadEnv } from "dotenv";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { runTestStrategy } from "./test-strategy.js";
 
 loadEnv({ path: resolve(process.cwd(), ".env") });
 
 type TaskPayload = {
   hasTask?: boolean;
+  type?: string;
+  theme?: string;
+  keywords?: string[];
+  themeId?: string;
+  vkGroup?: string;
+  landingUrl?: string;
   videoPrefix?: string;
   taskId?: string;
   /** Server typo; some responses use this instead of taskId */
@@ -66,7 +73,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function taskIdOf(task: TaskPayload): string {
-  return (task.taskId ?? task.tastId ?? "").trim();
+  return (task.taskId ?? task.tastId ?? task.themeId ?? "").trim();
 }
 
 async function fetchTask(): Promise<TaskPayload | null> {
@@ -84,8 +91,8 @@ async function fetchTask(): Promise<TaskPayload | null> {
     throw new Error(`Task endpoint returned ${resp.status}`);
   }
   const body = (await resp.json()) as unknown;
-  if (!body || typeof body !== "object") return null;
   console.log(body)
+  if (!body || typeof body !== "object") return null;
   const obj = body as Record<string, unknown>;
   if (obj.hasTask === false) return null;
   if (obj.task === null || obj.task === undefined) {
@@ -101,6 +108,8 @@ async function fetchTask(): Promise<TaskPayload | null> {
   if (
     direct.taskId ||
     direct.tastId ||
+    direct.themeId ||
+    (direct.type ?? "").trim().toLowerCase() === "test" ||
     direct.youtubeVideoUrl ||
     direct.youtubeChannelUrl
   ) {
@@ -235,12 +244,16 @@ function buildTaskEnv(task: TaskPayload): Record<string, string> {
   const out: Record<string, string> = { ...cfg };
   // Task DTO → fill env:
   // - youtubeVideoUrl → VIDEO_TARGET_HREF (target watch URL / fallback / video search)
+  // - vkGroup → VK_GROUP_URL (for stage2 vkStrategy)
+  // - landingUrl → LANDING_URL (for stage2 landingStrategy)
   // - youtubeChannelUrl → CHANNEL_TARGET_HREF
   // - youtubeChannelDescription (or typo youtubeChanngelDescription) → TEXT (stage1 search query)
   // - TEXT: videoPrefix + youtubeVideoDescription; без videoPrefix → описание канала (channgel typo)
   if (task.youtubeChannelUrl) out.CHANNEL_TARGET_HREF = task.youtubeChannelUrl;
   if (task.youtubeChannelName) out.CHANNEL_TARGET_NAME = task.youtubeChannelName;
   if (task.youtubeVideoUrl) out.VIDEO_TARGET_HREF = task.youtubeVideoUrl;
+  if (task.vkGroup) out.VK_GROUP_URL = task.vkGroup;
+  if (task.landingUrl) out.LANDING_URL = task.landingUrl;
   if (task.youtubeVideoDescription && !out.VIDEO_TARGET_NAME) {
     out.VIDEO_TARGET_NAME = task.youtubeVideoDescription;
   }
@@ -266,7 +279,107 @@ function buildTaskEnv(task: TaskPayload): Record<string, string> {
   // keep reasonable defaults if server config does not provide them
   if (!out.STAGE) out.STAGE = "both";
   if (!out.INPUT_SELECTOR) out.INPUT_SELECTOR = "input[name=\"search_query\"]";
+  if (!out.TEST_THEME && task.theme) out.TEST_THEME = task.theme;
+  if (!out.TEST_KEYWORDS && Array.isArray(task.keywords) && task.keywords.length > 0) {
+    out.TEST_KEYWORDS = task.keywords.join(",");
+  }
   return out;
+}
+
+function resolveTestKeywords(task: TaskPayload, taskEnv: Record<string, string>): string[] {
+  const raw =
+    taskEnv.TEST_KEYWORDS?.trim() ||
+    taskEnv.KEYWORDS?.trim() ||
+    "";
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter((x): x is string => typeof x === "string")
+          .map((x) => x.trim())
+          .filter((x) => x.length > 0);
+      }
+    } catch {
+      // not JSON, fallback to comma-separated list
+    }
+    return raw
+      .split(",")
+      .map((x) => x.trim())
+      .filter((x) => x.length > 0);
+  }
+
+  return Array.isArray(task.keywords)
+    ? task.keywords
+        .filter((x): x is string => typeof x === "string")
+        .map((x) => x.trim())
+        .filter((x) => x.length > 0)
+    : [];
+}
+
+async function reportTestTaskSuccess(task: TaskPayload): Promise<void> {
+  const taskId = taskIdOf(task);
+  if (!taskId) return;
+  const endpoint = process.env.TARGET_URL?.trim();
+  if (!endpoint) return;
+  const teamApiKey = (task.teamApiKey ?? process.env.TEAM_API_KEY ?? "").trim();
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (teamApiKey) headers["x-api-key"] = teamApiKey;
+  try {
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        taskId,
+        status: "completed",
+        type: "test",
+      }),
+    });
+    if (!resp.ok) {
+      console.warn(`[worker] test success report failed status=${resp.status}`);
+    }
+  } catch (e) {
+    console.warn("[worker] test success report error:", e);
+  }
+}
+
+async function runTestForTask(task: TaskPayload): Promise<number> {
+  const id = taskIdOf(task);
+  if (!id) {
+    console.error("[worker] test task skipped: missing taskId in payload");
+    return 1;
+  }
+  const taskEnv = buildTaskEnv(task);
+  const snapshot = new Map<string, string | undefined>();
+  for (const [k, v] of Object.entries({ ...taskEnv, TASK_ID: id })) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
+    snapshot.set(k, process.env[k]);
+    process.env[k] = String(v);
+  }
+  try {
+    const keywords = resolveTestKeywords(task, taskEnv);
+    const theme =
+      (taskEnv.TEST_THEME ?? "").trim() ||
+      (taskEnv.TEXT ?? "").trim() ||
+      (task.theme ?? "").trim() ||
+      (task.youtubeChannelDescription ?? task.youtubeChanngelDescription ?? "").trim();
+    console.log(
+      `[worker] starting test task ${id} theme="${theme}" keywords=${JSON.stringify(keywords)}`
+    );
+    const ok = await runTestStrategy(theme, keywords);
+    if (!ok) return 1;
+    await reportTestTaskSuccess(task);
+    console.log(`[worker] test task ${id} finished with code 0`);
+    return 0;
+  } catch (e) {
+    console.error(`[worker] test task ${id} failed:`, e);
+    return 1;
+  } finally {
+    for (const [k, prev] of snapshot.entries()) {
+      if (prev === undefined) delete process.env[k];
+      else process.env[k] = prev;
+    }
+  }
 }
 
 async function runFillForTask(task: TaskPayload): Promise<number> {
@@ -351,7 +464,12 @@ async function main(): Promise<void> {
         if (!task) {
           console.log("[worker] no task");
         } else {
-          await runFillForTask(task);
+          const taskType = (task.type ?? "").trim().toLowerCase();
+          if (taskType === "test") {
+            await runTestForTask(task);
+          } else {
+            await runFillForTask(task);
+          }
         }
         busy = false;
       }

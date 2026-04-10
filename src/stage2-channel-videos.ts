@@ -175,10 +175,6 @@ async function fallbackNavigateByAddressBar(targetHref: string): Promise<void> {
 }
 
 export async function stage2ClickVideosAndOpenVideoByHref(page: Page, targetVideoHref: string): Promise<"clicked" | "fallback-navigated"> {
-  if ((process.env.HEADLESS ?? "").trim().toLowerCase() === "true") {
-    throw new Error("stage2: headless не поддерживается (нужны системные скролл/клики nut.js).");
-  }
-
   const tabClicked = await clickVideosTab(page);
   if (tabClicked) {
     await page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});

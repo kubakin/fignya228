@@ -20,17 +20,16 @@
  * Переменные окружения (если нет флагов):
  *   TARGET_URL, INPUT_SELECTOR
  * Опционально:
- *   HEADLESS=true — без окна (для CI); по умолчанию окно браузера открыто и видно
- *   --headless — то же из командной строки
- *   USE_SYSTEM_MOUSE=false — только виртуальный курсор Playwright (в headless всегда так)
+ *   Приложение работает только в режиме с окном (headed).
+ *   Системная мышь nut.js используется всегда (обязательный режим).
  *   MOUSE_SPEED — базовая скорость системного курсора, px/сек (±20% на каждый запуск)
  *   MOUSE_OFFSET_X, MOUSE_OFFSET_Y — тонкая подстройка после автоучёта панелей браузера
  *   CLICK_VIEWPORT_TOP_SAFE_PX — зона «под хедером» (px сверху viewport); клик смещается ниже
- *   USE_SYSTEM_KEYBOARD=false — ввод через Playwright (например в headless уже так)
+ *   Системная клавиатура nut.js используется всегда.
  *   TYPO_MAX_PERCENT — доля опечаток (соседняя клавиша), по умолчанию 5 (то есть 5%);
  *     для nut-ввода системная раскладка клавиатуры должна совпадать с языком текста
  *   TYPING_DELAY_MULTIPLIER — множитель пауз между символами (например 1.5 или 2)
- *   USE_SYSTEM_SCROLL=false — отключить фазу скролла колесом nut.js (скролл только после Enter)
+ *   Скролл колёсиком nut.js используется всегда.
  *   SCROLL_CYCLES_MIN, SCROLL_CYCLES_MAX — число циклов «прокрутка + пауза 1–2 с», по умолчанию 1–20
  *   после скролла — системный клик по a#video-title (nut.js); VIDEO_TITLE_SELECTOR — свой CSS при необходимости
  *   50/50: (1) частичный ввод + подсказка YouTube при ≥2 словах, без Enter → скролл;
@@ -55,8 +54,8 @@
  *     PLAYWRIGHT_USER_DATA_DIR=путь — постоянный профиль (куки между запусками); опционально PLAYWRIGHT_BROWSER_CHANNEL=chrome|msedge|chromium
  */
 
-import { keyboard, sleep } from "@nut-tree-fork/nut-js";
-import { Key } from "@nut-tree-fork/shared";
+import { keyboard, mouse, sleep, straightTo } from "@nut-tree-fork/nut-js";
+import { Key, Point } from "@nut-tree-fork/shared";
 import { config as loadEnv } from "dotenv";
 import { resolve } from "node:path";
 import type { Locator, Page } from "playwright";
@@ -64,9 +63,7 @@ import {
   clearFocusedField,
   pressEnterAfterTyping,
   resolveTypoRatio,
-  shouldUseNutKeyboard,
   typeTextWithNut,
-  typeTextWithPlaywright,
 } from "./human-typing.js";
 import { nutClickVideoTitleLink } from "./click-video-title.js";
 import {
@@ -75,9 +72,8 @@ import {
 } from "./yt-search-suggestion.js";
 import {
   runHumanScrollDownPhase,
-  shouldRunNutScroll,
 } from "./human-scroll.js";
-import { dedupeConsecutive, humanLikePath, randFloat } from "./mouse-path.js";
+import { randFloat } from "./mouse-path.js";
 import {
   nutHumanMoveAndClick,
   nutHumanMoveAndClickScreenPoint,
@@ -97,39 +93,18 @@ loadEnv({ path: resolve(process.cwd(), ".env") });
 setupGlobalErrorLogging();
 
 type ParsedArgs = {
-  url?: string;
-  selector?: string;
   text?: string;
-  headed?: boolean;
-  headless?: boolean;
 };
 
 function parseArgs(argv: string[]): ParsedArgs {
   const out: ParsedArgs = {};
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--url" && argv[i + 1]) {
-      out.url = argv[++i];
-    } else if (a === "--selector" && argv[i + 1]) {
-      out.selector = argv[++i];
-    } else if (a === "--text" && argv[i + 1]) {
+    if (a === "--text" && argv[i + 1]) {
       out.text = argv[++i];
-    } else if (a === "--headed") {
-      out.headed = true;
-    } else if (a === "--headless") {
-      out.headless = true;
     }
   }
   return out;
-}
-
-/** По умолчанию окно видно; headless только с --headless или HEADLESS=true */
-function resolveHeadless(args: ParsedArgs): boolean {
-  if (args.headed) return false;
-  if (args.headless) return true;
-  const v = process.env.HEADLESS?.trim().toLowerCase();
-  if (v === "true" || v === "1" || v === "yes") return true;
-  return false;
 }
 
 function postLoadDelayMs(): number {
@@ -141,89 +116,11 @@ function postLoadDelayMs(): number {
   return randFloat(lo, hi);
 }
 
-/**
- * Точка в координатах viewport (для Playwright mouse).
- */
-async function randomClickInElementViewportPx(locator: Locator): Promise<{
-  x: number;
-  y: number;
-}> {
-  return locator.evaluate((el: Element) => {
-    const r = el.getBoundingClientRect();
-    const margin = Math.max(
-      2,
-      Math.min(r.width, r.height) * (0.08 + Math.random() * 0.1)
-    );
-    const w = Math.max(0, r.width - 2 * margin);
-    const h = Math.max(0, r.height - 2 * margin);
-    return {
-      x: r.left + margin + Math.random() * w,
-      y: r.top + margin + Math.random() * h,
-    };
-  });
-}
-
-/** Случайная точка у края viewport (откуда «входит» курсор после старта с 0,0). */
-function randomViewportEdgePoint(vp: { width: number; height: number }): {
-  x: number;
-  y: number;
-} {
-  const edge = Math.floor(Math.random() * 4);
-  if (edge === 0) return { x: randFloat(0, vp.width), y: 0 };
-  if (edge === 1)
-    return { x: vp.width - 1, y: randFloat(0, vp.height) };
-  if (edge === 2)
-    return { x: randFloat(0, vp.width), y: vp.height - 1 };
-  return { x: 0, y: randFloat(0, vp.height) };
-}
-
-/** Виртуальный курсор только внутри Chromium (в headless или при USE_SYSTEM_MOUSE=false). */
-async function movePlaywrightCursorAndClick(
-  page: Page,
+async function moveCursorAndClickToFocus(
+  _page: Page,
   locator: Locator
 ): Promise<void> {
-  await locator.scrollIntoViewIfNeeded();
-  const target = await randomClickInElementViewportPx(locator);
-  const vp = page.viewportSize();
-  const path =
-    vp === null
-      ? humanLikePath({ x: 0, y: 0 }, target)
-      : (() => {
-          const edge = randomViewportEdgePoint(vp);
-          const leg1 = humanLikePath({ x: 0, y: 0 }, edge);
-          const start2 = leg1[leg1.length - 1] ?? edge;
-          const leg2 = humanLikePath(start2, target);
-          return dedupeConsecutive([...leg1.slice(0, -1), ...leg2]);
-        })();
-  for (const p of path) {
-    await page.mouse.move(p.x, p.y, { steps: 1 });
-  }
-  await sleep(randFloat(200, 500));
-  await page.mouse.click(target.x, target.y);
-}
-
-/** Реальный системный курсор: кривая траектория и левый клик. */
-async function moveSystemCursorAndClick(locator: Locator): Promise<void> {
   await nutHumanMoveAndClick(locator);
-}
-
-function useSystemMouse(headless: boolean): boolean {
-  if (headless) return false;
-  const v = process.env.USE_SYSTEM_MOUSE?.trim().toLowerCase();
-  if (v === "false" || v === "0" || v === "no") return false;
-  return true;
-}
-
-async function moveCursorAndClickToFocus(
-  page: Page,
-  locator: Locator,
-  headless: boolean
-): Promise<void> {
-  if (useSystemMouse(headless)) {
-    await moveSystemCursorAndClick(locator);
-  } else {
-    await movePlaywrightCursorAndClick(page, locator);
-  }
 }
 
 type TeamTaskStatus = "prepare" | "process" | "completed";
@@ -259,7 +156,13 @@ async function reportTeamTaskStatus(
 }
 
 type SidebarPick = { selector: string; idx: number } | null;
-type Stage2Variant = "variant1" | "variant2" | "variant3" | "variant4";
+type Stage2Strategy =
+  | "channelSearchStrategy"
+  | "webChannelSearchStrategy"
+  | "webVideoSearchStrategy"
+  | "directLinkStrategy"
+  | "vkStrategy"
+  | "landingStrategy";
 
 /** Stage2 «досмотр»: STAGE2_VIDEO_END_MIN_RATIO или короткий алиас STAGE2_VIDEO_END_MIN, затем VIDEO_END_MIN_RATIO. */
 function resolveStage2VideoEndRatios(): { min: number; max: number } {
@@ -322,41 +225,54 @@ function parseProb(name: string, fallback: number): number {
   return Math.max(0, n);
 }
 
-function pickWeightedVariant(candidates: Array<{ variant: Stage2Variant; weight: number }>): Stage2Variant {
+function pickWeightedStrategy(
+  candidates: Array<{ strategy: Stage2Strategy; weight: number }>
+): Stage2Strategy {
   const sanitized = candidates
     .map((x) => ({ ...x, weight: Number.isFinite(x.weight) ? Math.max(0, x.weight) : 0 }))
     .filter((x) => x.weight > 0);
-  if (sanitized.length === 0) return "variant1";
+  if (sanitized.length === 0) return "directLinkStrategy";
   const sum = sanitized.reduce((acc, x) => acc + x.weight, 0);
   let r = Math.random() * sum;
   for (const x of sanitized) {
     r -= x.weight;
-    if (r <= 0) return x.variant;
+    if (r <= 0) return x.strategy;
   }
-  return sanitized[sanitized.length - 1]!.variant;
+  return sanitized[sanitized.length - 1]!.strategy;
 }
 
-function resolveStage2Variant(opts: {
+function resolveStage2Strategy(opts: {
   stage2Name?: string;
   channelTargetHref?: string;
   videoTargetHref?: string;
   videoTargetName?: string;
-}): Stage2Variant {
-  const candidates: Array<{ variant: Stage2Variant; weight: number }> = [];
-  const v1w = parseProb("STAGE2_VARIANT1_PROB", 0.0);
-  const v2w = parseProb("STAGE2_VARIANT2_PROB", 0.30);
-  const v3w = parseProb("STAGE2_VARIANT3_PROB", 0.70);
-  if (opts.channelTargetHref && opts.videoTargetHref) candidates.push({ variant: "variant1", weight: v1w });
-  if (opts.stage2Name && opts.videoTargetHref) candidates.push({ variant: "variant2", weight: v2w });
-  if (opts.videoTargetName || opts.videoTargetHref) candidates.push({ variant: "variant3", weight: v3w });
+  vkGroupUrl?: string;
+  landingUrl?: string;
+}): Stage2Strategy {
+  return 'landingStrategy';
+  const candidates: Array<{ strategy: Stage2Strategy; weight: number }> = [];
+  const s1 = parseProb("STAGE2_STRATEGY_CHANNEL_SEARCH_PROB", parseProb("STAGE2_VARIANT1_PROB", 0.0));
+  const s2 = parseProb("STAGE2_STRATEGY_WEB_CHANNEL_PROB", parseProb("STAGE2_VARIANT2_PROB", 0.30));
+  const s3 = parseProb("STAGE2_STRATEGY_WEB_VIDEO_PROB", parseProb("STAGE2_VARIANT3_PROB", 0.70));
+  const s4 = parseProb("STAGE2_STRATEGY_DIRECT_LINK_PROB", 0.10);
+  const s5 = parseProb("STAGE2_STRATEGY_VK_PROB", 0.10);
+  const s6 = parseProb("STAGE2_STRATEGY_LANDING_PROB", 0.10);
+  if (opts.channelTargetHref && opts.videoTargetHref) candidates.push({ strategy: "channelSearchStrategy", weight: s1 });
+  if (opts.stage2Name && opts.videoTargetHref) candidates.push({ strategy: "webChannelSearchStrategy", weight: s2 });
+  if (opts.videoTargetName || opts.videoTargetHref) candidates.push({ strategy: "webVideoSearchStrategy", weight: s3 });
+  if (opts.videoTargetHref || opts.channelTargetHref) candidates.push({ strategy: "directLinkStrategy", weight: s4 });
+  if (opts.vkGroupUrl && opts.videoTargetHref) candidates.push({ strategy: "vkStrategy", weight: s5 });
+  if (opts.landingUrl && opts.videoTargetHref) candidates.push({ strategy: "landingStrategy", weight: s6 });
   console.log(
-    `[stage2] weights v1=${v1w} v2=${v2w} v3=${v3w}; inputs channelName=${Boolean(
+    `[stage2] strategy weights channel=${s1} webChannel=${s2} webVideo=${s3} direct=${s4} vk=${s5} landing=${s6}; inputs channelName=${Boolean(
       opts.stage2Name
     )} channelHref=${Boolean(opts.channelTargetHref)} videoHref=${Boolean(
       opts.videoTargetHref
-    )} videoName=${Boolean(opts.videoTargetName)}`
+    )} videoName=${Boolean(opts.videoTargetName)} vkGroup=${Boolean(opts.vkGroupUrl)} landingUrl=${Boolean(
+      opts.landingUrl
+    )}`
   );
-  return pickWeightedVariant(candidates);
+  return pickWeightedStrategy(candidates);
 }
 
 function shouldSkipStage1ByChance(baseRunStage1: boolean): boolean {
@@ -380,8 +296,16 @@ async function nutSearchFromAddressBar(query: string): Promise<void> {
 }
 
 function stage2TimeoutMs(): number {
-  const n = Number(process.env.STAGE2_VARIANT_TIMEOUT_MS ?? 120_000);
-  return Number.isFinite(n) && n >= 10_000 ? Math.floor(n) : 120_000;
+  const n = Number(
+    process.env.STAGE2_STRATEGY_TIMEOUT_MS ??
+      process.env.STAGE2_VARIANT_TIMEOUT_MS ??
+      300_000
+  );
+  if (!Number.isFinite(n)) return 300_000;
+  const ms = Math.floor(n);
+  if (ms < 10_000) return 10_000;
+  // Hard cap: if strategy hangs, force fallback to direct URL after <= 5 minutes.
+  return Math.min(ms, 300_000);
 }
 
 async function hasCaptchaOrVerification(page: Page): Promise<boolean> {
@@ -406,19 +330,260 @@ async function hasCaptchaOrVerification(page: Page): Promise<boolean> {
   }
 }
 
-async function stage2Variant4DirectNavigate(opts: {
+async function stage2DirectLinkStrategy(opts: {
   page: Page;
   channelTargetHref?: string;
   videoTargetHref?: string;
 }): Promise<void> {
   const directHref = (opts.videoTargetHref?.trim() || opts.channelTargetHref?.trim() || "");
   if (!directHref) {
-    throw new Error("stage2 variant4: no direct link available (VIDEO_TARGET_HREF/CHANNEL_TARGET_HREF).");
+    throw new Error("stage2 directLinkStrategy: no direct link available (VIDEO_TARGET_HREF/CHANNEL_TARGET_HREF).");
   }
-  console.log(`[stage2] fallback variant4 direct navigate: ${directHref}`);
+  console.log(`[stage2] directLinkStrategy navigate: ${directHref}`);
   await nutSearchFromAddressBar(directHref);
   await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
   await ensureVideoPlayingIfPaused(opts.page);
+}
+
+async function dismissModalboxIfVisible(page: Page): Promise<boolean> {
+  const point = await page.evaluate(function () {
+    const modal = document.querySelector('[data-testid="modalbox"]') as HTMLElement | null;
+    if (!modal) return null;
+    const style = window.getComputedStyle(modal);
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      Number(style.opacity || "1") < 0.05
+    ) {
+      return null;
+    }
+
+    const r = modal.getBoundingClientRect();
+    if (r.width < 20 || r.height < 20) return null;
+    if (
+      r.bottom <= 0 ||
+      r.top >= window.innerHeight ||
+      r.right <= 0 ||
+      r.left >= window.innerWidth
+    ) {
+      return null;
+    }
+
+    const chromeTop = window.outerHeight - window.innerHeight;
+    const chromeLeft = window.outerWidth - window.innerWidth;
+    const cx = Math.min(window.innerWidth - 8, Math.max(8, r.left + r.width / 2));
+    const offset = 18 + Math.floor(Math.random() * (54 - 18 + 1));
+    const cy = Math.min(window.innerHeight - 8, Math.max(8, r.top - offset));
+    return {
+      x: Math.round(window.screenX + chromeLeft / 2 + cx),
+      y: Math.round(window.screenY + chromeTop + cy),
+    };
+  });
+
+  if (!point) return false;
+  await nutHumanMoveAndClickScreenPoint(point.x, point.y);
+  await sleep(randFloat(220, 520));
+  return true;
+}
+
+async function stage2VkStrategy(opts: {
+  page: Page;
+  vkGroupUrl: string;
+  videoTargetHref: string;
+}): Promise<void> {
+  console.log("[stage2][vkStrategy] start", {
+    vkGroupUrl: opts.vkGroupUrl,
+    videoTargetHref: opts.videoTargetHref,
+  });
+  await nutSearchFromAddressBar(opts.vkGroupUrl);
+  await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
+  await sleep(randFloat(1000, 2200));
+
+  console.log("[stage2][vkStrategy] initial human scroll");
+  await runHumanScrollDownPhase(opts.page);
+  const hoverPoints = await opts.page.evaluate(function () {
+    const els = document.querySelectorAll("a, button, div, img, span");
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const chromeTop = window.outerHeight - window.innerHeight;
+    const chromeLeft = window.outerWidth - window.innerWidth;
+    const points: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i < els.length && points.length < 4; i++) {
+      const e = els[i] as Element;
+      const r = e.getBoundingClientRect();
+      const intersects =
+        r.width > 10 &&
+        r.height > 10 &&
+        r.bottom > 0 &&
+        r.right > 0 &&
+        r.left < vw &&
+        r.top < vh;
+      if (!intersects) continue;
+      points.push({
+        x: Math.round(window.screenX + chromeLeft / 2 + r.left + r.width / 2),
+        y: Math.round(window.screenY + chromeTop + r.top + r.height / 2),
+      });
+    }
+    return points;
+  });
+  console.log("[stage2][vkStrategy] hover points prepared", { count: hoverPoints.length });
+  for (const p of hoverPoints) {
+    mouse.config.autoDelayMs = 0;
+    mouse.config.mouseSpeed = randFloat(340, 860);
+    await mouse.move(straightTo(new Point(p.x, p.y)));
+    await sleep(randFloat(250, 700));
+  }
+  console.log("[stage2][vkStrategy] hover simulation done");
+
+  const linkInfo = await opts.page.evaluate(function ({ youtubeHref }: { youtubeHref: string }) {
+    const links = document.querySelectorAll("a[href]");
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const absHrefRe = /^https?:\/\//i;
+    for (let j = 0; j < links.length; j++) {
+      (links[j] as HTMLAnchorElement).removeAttribute("data-yt-worker-patched");
+    }
+    for (let i = 0; i < links.length; i++) {
+      const a = links[i] as HTMLAnchorElement;
+      const classMatches = Array.from(a.classList).some((cls) => cls.startsWith("vkitLink__link"));
+      if (!classMatches) continue;
+      const rawHref = (a.getAttribute("href") || "").trim();
+      if (!absHrefRe.test(rawHref)) continue;
+      const r = a.getBoundingClientRect();
+      const intersects =
+        r.width > 8 &&
+        r.height > 8 &&
+        r.bottom > 0 &&
+        r.right > 0 &&
+        r.left < vw &&
+        r.top < vh;
+      if (!intersects) continue;
+      const beforeHref = a.getAttribute("href") || a.href || "";
+      a.setAttribute("href", youtubeHref);
+      a.setAttribute("target", "_self");
+      a.removeAttribute("onclick");
+      a.setAttribute("rel", "noopener");
+      a.setAttribute("data-yt-worker-patched", "1");
+      const afterHref = a.getAttribute("href") || a.href || "";
+      return { i, beforeHref, afterHref };
+    }
+    return null;
+  }, { youtubeHref: opts.videoTargetHref });
+  console.log("[stage2][vkStrategy] link patch result", linkInfo);
+  if (!linkInfo) {
+    throw new Error("stage2 vkStrategy: no visible link found to patch href");
+  }
+  const link = opts.page.locator("a[data-yt-worker-patched='1']").first();
+  await link.scrollIntoViewIfNeeded();
+  const modalDismissed = await dismissModalboxIfVisible(opts.page);
+  if (modalDismissed) {
+    console.log("[stage2][vkStrategy] modalbox dismissed before link click");
+  }
+  console.log("[stage2][vkStrategy] clicking patched link");
+  await nutHumanMoveAndClick(link);
+  await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
+  console.log("[stage2][vkStrategy] reached target page, ensure playback");
+  await ensureVideoPlayingIfPaused(opts.page);
+  console.log("[stage2][vkStrategy] done");
+}
+
+async function stage2LandingStrategy(opts: {
+  page: Page;
+  landingUrl: string;
+  videoTargetHref: string;
+}): Promise<void> {
+  console.log("[stage2][landingStrategy] start", {
+    landingUrl: opts.landingUrl,
+    videoTargetHref: opts.videoTargetHref,
+  });
+  await nutSearchFromAddressBar(opts.landingUrl);
+  await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
+  await sleep(randFloat(1000, 2200));
+
+  console.log("[stage2][landingStrategy] initial human scroll");
+  await runHumanScrollDownPhase(opts.page);
+  const hoverPoints = await opts.page.evaluate(function () {
+    const els = document.querySelectorAll("a, button, div, img, span");
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const chromeTop = window.outerHeight - window.innerHeight;
+    const chromeLeft = window.outerWidth - window.innerWidth;
+    const points: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i < els.length && points.length < 5; i++) {
+      const e = els[i] as Element;
+      const r = e.getBoundingClientRect();
+      const intersects =
+        r.width > 10 &&
+        r.height > 10 &&
+        r.bottom > 0 &&
+        r.right > 0 &&
+        r.left < vw &&
+        r.top < vh;
+      if (!intersects) continue;
+      points.push({
+        x: Math.round(window.screenX + chromeLeft / 2 + r.left + r.width / 2),
+        y: Math.round(window.screenY + chromeTop + r.top + r.height / 2),
+      });
+    }
+    return points;
+  });
+  console.log("[stage2][landingStrategy] hover points prepared", { count: hoverPoints.length });
+  for (const p of hoverPoints) {
+    mouse.config.autoDelayMs = 0;
+    mouse.config.mouseSpeed = randFloat(340, 860);
+    await mouse.move(straightTo(new Point(p.x, p.y)));
+    await sleep(randFloat(250, 700));
+  }
+  console.log("[stage2][landingStrategy] hover simulation done");
+
+  const linkInfo = await opts.page.evaluate(function ({ youtubeHref }: { youtubeHref: string }) {
+    const links = document.querySelectorAll("a[href]");
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const absHrefRe = /^https?:\/\//i;
+    for (let j = 0; j < links.length; j++) {
+      (links[j] as HTMLAnchorElement).removeAttribute("data-yt-worker-patched");
+    }
+    for (let i = 0; i < links.length; i++) {
+      const a = links[i] as HTMLAnchorElement;
+      const rawHref = (a.getAttribute("href") || "").trim();
+      if (!absHrefRe.test(rawHref)) continue;
+      const r = a.getBoundingClientRect();
+      const intersects =
+        r.width > 8 &&
+        r.height > 8 &&
+        r.bottom > 0 &&
+        r.right > 0 &&
+        r.left < vw &&
+        r.top < vh;
+      if (!intersects) continue;
+      const beforeHref = a.getAttribute("href") || a.href || "";
+      a.setAttribute("href", youtubeHref);
+      a.setAttribute("target", "_self");
+      a.removeAttribute("onclick");
+      a.setAttribute("rel", "noopener");
+      a.setAttribute("data-yt-worker-patched", "1");
+      const afterHref = a.getAttribute("href") || a.href || "";
+      return { i, beforeHref, afterHref };
+    }
+    return null;
+  }, { youtubeHref: opts.videoTargetHref });
+  console.log("[stage2][landingStrategy] link patch result", linkInfo);
+  if (!linkInfo) {
+    throw new Error("stage2 landingStrategy: no visible absolute link found to patch href");
+  }
+  const link = opts.page.locator("a[data-yt-worker-patched='1']").first();
+  await link.scrollIntoViewIfNeeded();
+  const modalDismissed = await dismissModalboxIfVisible(opts.page);
+  if (modalDismissed) {
+    console.log("[stage2][landingStrategy] modalbox dismissed before link click");
+  }
+  console.log("[stage2][landingStrategy] clicking patched link");
+  await nutHumanMoveAndClick(link);
+  await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
+  console.log("[stage2][landingStrategy] reached target page, ensure playback");
+  await ensureVideoPlayingIfPaused(opts.page);
+  console.log("[stage2][landingStrategy] done");
 }
 
 /**
@@ -502,7 +667,7 @@ async function ensureVideoPlayingIfPaused(page: Page): Promise<void> {
   if (paused === null) return;
   if (!paused) return;
 
-  console.log("[stage2] variant4: video is paused, starting playback (nut.js)");
+  console.log("[stage2] directLinkStrategy: video is paused, starting playback (nut.js)");
 
   keyboard.config.autoDelayMs = 0;
 
@@ -524,7 +689,7 @@ async function ensureVideoPlayingIfPaused(page: Page): Promise<void> {
         await nutHumanMoveAndClickScreenPoint(pt.x, pt.y);
         await sleep(randFloat(220, 480));
       } catch (e) {
-        console.warn("[stage2] variant4: mouse click failed, trying keys only:", e);
+        console.warn("[stage2] directLinkStrategy: mouse click failed, trying keys only:", e);
       }
     }
 
@@ -551,7 +716,7 @@ async function ensureVideoPlayingIfPaused(page: Page): Promise<void> {
   const after = await evalMainVideoPaused(page);
   const playing = after === false;
   console.log(
-    `[stage2] variant4: video playing=${playing}${after === null ? " (no <video>)" : ""}`
+    `[stage2] directLinkStrategy: video playing=${playing}${after === null ? " (no <video>)" : ""}`
   );
 }
 
@@ -619,11 +784,270 @@ async function findAndClickVisibleSearchLink(page: Page, opts: {
   return false;
 }
 
+async function executeStage1(opts: {
+  runStage1: boolean;
+  runStage1Base: boolean;
+  channelMode: boolean;
+  text: string;
+  typoRatio: number;
+  page: Page;
+  input: Locator;
+  taskId: string | undefined;
+}): Promise<{ stage1Completed: boolean; videoNearEndDone: boolean }> {
+  let stage1Completed = false;
+  if (opts.runStage1) {
+    try {
+      const ytSplit = getPartialTypingSplitForSuggestion(opts.text);
+      const partialFlowNoEnter = Math.random() < 0.5;
+
+      if (partialFlowNoEnter) {
+        if (ytSplit) {
+          await typeTextWithNut(ytSplit.first, { typoRatio: opts.typoRatio });
+          await maybeClickRandomYtSuggestion(opts.page, opts.text);
+          if (ytSplit.rest.length > 0) {
+            await typeTextWithNut(ytSplit.rest, { typoRatio: opts.typoRatio });
+          }
+        } else {
+          await typeTextWithNut(opts.text, { typoRatio: opts.typoRatio });
+        }
+        if (opts.channelMode) {
+          await pressEnterAfterTyping();
+        }
+      } else {
+        await typeTextWithNut(opts.text, { typoRatio: opts.typoRatio });
+        await maybeClickRandomYtSuggestion(opts.page, opts.text);
+        await pressEnterAfterTyping();
+      }
+      stage1Completed = true;
+    } catch (e) {
+      console.warn("[stage1] failed, continuing to stage2:", e);
+    }
+  } else if (opts.runStage1Base) {
+    console.log("[stage1] skipped by STAGE1_SKIP_PROB");
+  }
+
+  let videoNearEndDone = false;
+  if (stage1Completed) {
+    await runHumanScrollDownPhase(opts.page);
+    await nutClickVideoTitleLink(opts.page);
+    videoNearEndDone = await waitForYoutubeVideoNearEndIfWatch(opts.page);
+    if (videoNearEndDone) {
+      console.log("hello world");
+      if (Math.random() < 0.5) {
+        const picked = await pickRandomVisibleSidebarVideo(opts.page);
+        if (picked) {
+          const side = opts.page.locator(picked.selector).nth(picked.idx);
+          await nutHumanMoveAndClick(side);
+          await opts.page.waitForLoadState("domcontentloaded", {
+            timeout: 60_000,
+          }).catch(() => {});
+          await sleep(randFloat(900, 1700));
+          await waitForYoutubeVideoNearEndIfWatch(opts.page);
+        }
+      }
+    }
+  }
+
+  if (stage1Completed) {
+    await reportTeamTaskStatus(opts.taskId, "process");
+  }
+  return { stage1Completed, videoNearEndDone };
+}
+
+async function runChosenStage2Strategy(opts: {
+  chosenStrategy: Stage2Strategy;
+  stage2Name?: string;
+  channelTargetHref?: string;
+  channelMode: boolean;
+  videoTargetHref?: string;
+  videoTargetName?: string;
+  vkGroupUrl?: string;
+  landingUrl?: string;
+  typoRatio: number;
+  page: Page;
+  input: Locator;
+}): Promise<void> {
+  if (opts.chosenStrategy === "channelSearchStrategy") {
+    if (opts.stage2Name) {
+      await opts.input.waitFor({ state: "visible", timeout: 30_000 });
+      await moveCursorAndClickToFocus(opts.page, opts.input);
+      await clearFocusedField();
+      await typeTextWithNut(opts.stage2Name, { typoRatio: opts.typoRatio });
+      await pressEnterAfterTyping();
+      await sleep(randFloat(1000, 3000));
+    }
+    if (opts.channelMode && opts.channelTargetHref) {
+      await sleep(randFloat(350, 900));
+      const res = await scrollFindChannelHrefOrFallbackSearch({
+        page: opts.page,
+        input: opts.input,
+        targetHref: opts.channelTargetHref,
+      });
+      console.log(`[stage2] channel href result: ${res}`);
+    }
+    if (opts.videoTargetHref) {
+      const r = await stage2ClickVideosAndOpenVideoByHref(opts.page, opts.videoTargetHref);
+      console.log(`[stage2] video href result: ${r}`);
+    }
+    return;
+  }
+
+  if (opts.chosenStrategy === "webChannelSearchStrategy") {
+    if (!opts.stage2Name) {
+      throw new Error("stage2 webChannelSearchStrategy: CHANNEL_TARGET_NAME is empty");
+    }
+    const query = `"${opts.stage2Name}" site:youtube.com`;
+    await nutSearchFromAddressBar(query);
+    const clicked = await findAndClickVisibleSearchLink(opts.page, {
+      hrefNeedle: opts.channelTargetHref,
+      textNeedle: opts.stage2Name,
+      timeoutMs: Math.round(randFloat(12_000, 24_000)),
+    });
+    if (!clicked && opts.channelTargetHref) {
+      await nutSearchFromAddressBar(opts.channelTargetHref);
+    }
+    await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
+    if (opts.videoTargetHref) {
+      const r = await stage2ClickVideosAndOpenVideoByHref(opts.page, opts.videoTargetHref);
+      console.log(`[stage2] video href result: ${r}`);
+    }
+    return;
+  }
+
+  if (opts.chosenStrategy === "webVideoSearchStrategy") {
+    const queryBase = opts.videoTargetName || opts.videoTargetHref || "";
+    if (!queryBase) {
+      throw new Error("stage2 webVideoSearchStrategy: VIDEO_TARGET_NAME/VIDEO_TARGET_HREF is empty");
+    }
+    const query = `"${queryBase}" site:youtube.com`;
+    await nutSearchFromAddressBar(query);
+    const clicked = await findAndClickVisibleSearchLink(opts.page, {
+      hrefNeedle: opts.videoTargetHref,
+      textNeedle: opts.videoTargetName,
+      timeoutMs: Math.round(randFloat(12_000, 26_000)),
+    });
+    if (!clicked && opts.videoTargetHref) {
+      await nutSearchFromAddressBar(opts.videoTargetHref);
+    }
+    await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
+    return;
+  }
+
+  if (opts.chosenStrategy === "vkStrategy") {
+    if (!opts.vkGroupUrl || !opts.videoTargetHref) {
+      throw new Error("stage2 vkStrategy: VK_GROUP_URL and VIDEO_TARGET_HREF are required");
+    }
+    await stage2VkStrategy({
+      page: opts.page,
+      vkGroupUrl: opts.vkGroupUrl,
+      videoTargetHref: opts.videoTargetHref,
+    });
+    return;
+  }
+
+  if (opts.chosenStrategy === "landingStrategy") {
+    if (!opts.landingUrl || !opts.videoTargetHref) {
+      throw new Error("stage2 landingStrategy: LANDING_URL and VIDEO_TARGET_HREF are required");
+    }
+    await stage2LandingStrategy({
+      page: opts.page,
+      landingUrl: opts.landingUrl,
+      videoTargetHref: opts.videoTargetHref,
+    });
+    return;
+  }
+
+  await stage2DirectLinkStrategy({
+    page: opts.page,
+    channelTargetHref: opts.channelTargetHref,
+    videoTargetHref: opts.videoTargetHref,
+  });
+}
+
+async function executeStage2(opts: {
+  runStage2: boolean;
+  stage2Name?: string;
+  channelTargetHref?: string;
+  channelMode: boolean;
+  videoTargetHref?: string;
+  videoTargetName?: string;
+  vkGroupUrl?: string;
+  landingUrl?: string;
+  typoRatio: number;
+  page: Page;
+  input: Locator;
+  taskId: string | undefined;
+}): Promise<boolean> {
+  if (!opts.runStage2) return false;
+
+  const chosenStrategy = resolveStage2Strategy({
+    stage2Name: opts.stage2Name,
+    channelTargetHref: opts.channelTargetHref,
+    videoTargetHref: opts.videoTargetHref,
+    videoTargetName: opts.videoTargetName,
+    vkGroupUrl: opts.vkGroupUrl,
+    landingUrl: opts.landingUrl,
+  });
+  console.log(`[stage2] chosen strategy: ${chosenStrategy}`);
+
+  try {
+    const timeoutMs = stage2TimeoutMs();
+    await Promise.race([
+      runChosenStage2Strategy({
+        chosenStrategy,
+        stage2Name: opts.stage2Name,
+        channelTargetHref: opts.channelTargetHref,
+        channelMode: opts.channelMode,
+        videoTargetHref: opts.videoTargetHref,
+        videoTargetName: opts.videoTargetName,
+        vkGroupUrl: opts.vkGroupUrl,
+        landingUrl: opts.landingUrl,
+        typoRatio: opts.typoRatio,
+        page: opts.page,
+        input: opts.input,
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`stage2 strategy timeout ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+
+    if (await hasCaptchaOrVerification(opts.page)) {
+      throw new Error("captcha/verification detected");
+    }
+  } catch (e) {
+    console.warn("[stage2] strategy failed, switching to directLinkStrategy:", e);
+    await stage2DirectLinkStrategy({
+      page: opts.page,
+      channelTargetHref: opts.channelTargetHref,
+      videoTargetHref: opts.videoTargetHref,
+    });
+  }
+
+  const { min: minR, max: maxR } = resolveStage2VideoEndRatios();
+  console.log(
+    `[stage2] target watch ratio range: ${minR}..${maxR} (STAGE2_VIDEO_END_MIN[_RATIO] / MAX[_RATIO] or VIDEO_END_*)`
+  );
+  const stage2WatchOk = await waitForYoutubeVideoNearEndIfWatch(opts.page, {
+    ratioMin: minR,
+    ratioMax: maxR,
+    ignoreVideoWatchSecLimits: true,
+  });
+
+  if (stage2WatchOk) {
+    await reportTeamTaskStatus(opts.taskId, "completed");
+  } else {
+    console.warn(
+      "[stage2] целевой просмотр по заданным VIDEO_END_/STAGE2_VIDEO_END_ долям не достигнут — completed не отправляем"
+    );
+  }
+
+  return stage2WatchOk;
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv);
   const url = 'https://youtube.com'
   const selector = 'input[name="search_query"]'
-  const headless = resolveHeadless(args);
   const stage = (process.env.STAGE ?? "both").trim().toLowerCase();
   const runStage1Base = stage !== "stage2";
   const runStage2 = stage !== "stage1";
@@ -633,6 +1057,8 @@ async function main(): Promise<void> {
   const channelMode = runStage2 && Boolean(channelTargetHref);
   const videoTargetHref = process.env.VIDEO_TARGET_HREF?.trim();
   const videoTargetName = process.env.VIDEO_TARGET_NAME?.trim();
+  const vkGroupUrl = process.env.VK_GROUP_URL?.trim();
+  const landingUrl = process.env.LANDING_URL?.trim();
   const taskId = process.env.TASK_ID ?? process.env.TASKID;
   const text = args.text ?? process.env.TEXT ?? "Hello world";
 
@@ -647,224 +1073,39 @@ async function main(): Promise<void> {
   //   process.exit(1);
   // }
 
-  const { page, close } = await createBrowserSession(headless);
+  const { page, close } = await createBrowserSession();
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
     await sleep(postLoadDelayMs());
     const input = page.locator(selector).first();
     await input.waitFor({ state: "visible", timeout: 30_000 });
-    await moveCursorAndClickToFocus(page, input, headless);
+    await moveCursorAndClickToFocus(page, input);
     const typoRatio = resolveTypoRatio();
-    const useNutKb = shouldUseNutKeyboard(headless);
-    let stage1Completed = false;
-    if (runStage1) {
-      try {
-        const ytSplit = getPartialTypingSplitForSuggestion(text, headless);
-        /** true: частичный ввод + подсказка, без Enter, сразу скролл. false: полный ввод, Enter, скролл. */
-        const partialFlowNoEnter = Math.random() < 0.5;
+    const { videoNearEndDone } = await executeStage1({
+      runStage1,
+      runStage1Base,
+      channelMode,
+      text,
+      typoRatio,
+      page,
+      input,
+      taskId,
+    });
 
-        if (partialFlowNoEnter) {
-          if (ytSplit) {
-            if (useNutKb) {
-              await typeTextWithNut(ytSplit.first, { typoRatio });
-            } else {
-              await typeTextWithPlaywright(page, ytSplit.first, { typoRatio });
-            }
-            await maybeClickRandomYtSuggestion(page, text, headless);
-            if (ytSplit.rest.length > 0) {
-              if (useNutKb) {
-                await typeTextWithNut(ytSplit.rest, { typoRatio });
-              } else {
-                await typeTextWithPlaywright(page, ytSplit.rest, { typoRatio });
-              }
-            }
-          } else {
-            if (useNutKb) {
-              await typeTextWithNut(text, { typoRatio });
-            } else {
-              await typeTextWithPlaywright(page, text, { typoRatio });
-            }
-          }
-          // Во втором этапе нужен переход на результаты, поэтому Enter обязателен.
-          if (channelMode) {
-            await pressEnterAfterTyping(page, useNutKb);
-          }
-        } else {
-          if (useNutKb) {
-            await typeTextWithNut(text, { typoRatio });
-          } else {
-            await typeTextWithPlaywright(page, text, { typoRatio });
-          }
-          await maybeClickRandomYtSuggestion(page, text, headless);
-          await pressEnterAfterTyping(page, useNutKb);
-        }
-        stage1Completed = true;
-      } catch (e) {
-        console.warn("[stage1] failed, continuing to stage2:", e);
-      }
-    } else if (runStage1Base) {
-      console.log("[stage1] skipped by STAGE1_SKIP_PROB");
-    }
-
-    let videoNearEndDone = false;
-    if (stage1Completed && shouldRunNutScroll(headless)) {
-      await runHumanScrollDownPhase(page);
-      if (!headless) {
-        await nutClickVideoTitleLink(page);
-        videoNearEndDone = await waitForYoutubeVideoNearEndIfWatch(page);
-        if (videoNearEndDone) {
-          console.log("hello world");
-          // После частичного просмотра stage1: 50% шанс перейти на случайное боковое видео.
-          if (Math.random() < 0.5) {
-            const picked = await pickRandomVisibleSidebarVideo(page);
-            if (picked) {
-              const side = page.locator(picked.selector).nth(picked.idx);
-              await nutHumanMoveAndClick(side);
-              await page.waitForLoadState("domcontentloaded", {
-                timeout: 60_000,
-              }).catch(() => {});
-              await sleep(randFloat(900, 1700));
-              await waitForYoutubeVideoNearEndIfWatch(page);
-            }
-          }
-        }
-      }
-    }
-    if (stage1Completed) {
-      await reportTeamTaskStatus(taskId, "process");
-    }
-
-    if (runStage2) {
-      if (headless) {
-        throw new Error("stage2: only headed mode is supported (nut.js real-user actions).");
-      }
-      const stage2UseNutKb = true;
-      const chosenVariant = resolveStage2Variant({
-        stage2Name,
-        channelTargetHref,
-        videoTargetHref,
-        videoTargetName,
-      });
-      console.log(`[stage2] chosen flow: ${chosenVariant}`);
-
-      const runChosenVariant = async (): Promise<void> => {
-        if (chosenVariant === "variant1") {
-          if (stage2Name) {
-            await input.waitFor({ state: "visible", timeout: 30_000 });
-            await moveCursorAndClickToFocus(page, input, headless);
-            await clearFocusedField(page);
-            await typeTextWithNut(stage2Name, { typoRatio });
-            await pressEnterAfterTyping(page, stage2UseNutKb);
-            await sleep(randFloat(1000, 3000));
-          }
-          if (channelMode && channelTargetHref) {
-            await sleep(randFloat(350, 900));
-            const res = await scrollFindChannelHrefOrFallbackSearch({
-              page,
-              input,
-              targetHref: channelTargetHref,
-              useNutKeyboard: useNutKb,
-              typoRatio,
-            });
-            console.log(`[stage2] channel href result: ${res}`);
-          }
-          if (videoTargetHref) {
-            const r = await stage2ClickVideosAndOpenVideoByHref(page, videoTargetHref);
-            console.log(`[stage2] video href result: ${r}`);
-          }
-          return;
-        }
-
-        if (chosenVariant === "variant2") {
-          if (!stage2Name) {
-            throw new Error("stage2 variant2: CHANNEL_TARGET_NAME is empty");
-          }
-          const query = `"${stage2Name}" site:youtube.com`;
-          await nutSearchFromAddressBar(query);
-          const clicked = await findAndClickVisibleSearchLink(page, {
-            hrefNeedle: channelTargetHref,
-            textNeedle: stage2Name,
-            timeoutMs: Math.round(randFloat(12_000, 24_000)),
-          });
-          if (!clicked && channelTargetHref) {
-            await nutSearchFromAddressBar(channelTargetHref);
-          }
-          await page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
-          if (videoTargetHref) {
-            const r = await stage2ClickVideosAndOpenVideoByHref(page, videoTargetHref);
-            console.log(`[stage2] video href result: ${r}`);
-          }
-          return;
-        }
-
-        if (chosenVariant === "variant3") {
-          const queryBase = videoTargetName || videoTargetHref || "";
-          if (!queryBase) {
-            throw new Error("stage2 variant3: VIDEO_TARGET_NAME/VIDEO_TARGET_HREF is empty");
-          }
-          const query = `"${queryBase}" site:youtube.com`;
-          await nutSearchFromAddressBar(query);
-          const clicked = await findAndClickVisibleSearchLink(page, {
-            hrefNeedle: videoTargetHref,
-            textNeedle: videoTargetName,
-            timeoutMs: Math.round(randFloat(12_000, 26_000)),
-          });
-          if (!clicked && videoTargetHref) {
-            await nutSearchFromAddressBar(videoTargetHref);
-          }
-          await page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
-          return;
-        }
-
-        await stage2Variant4DirectNavigate({
-          page,
-          channelTargetHref,
-          videoTargetHref,
-        });
-      };
-
-      try {
-        const timeoutMs = stage2TimeoutMs();
-        await Promise.race([
-          runChosenVariant(),
-          new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error(`stage2 variant timeout ${timeoutMs}ms`)), timeoutMs);
-          }),
-        ]);
-
-        if (await hasCaptchaOrVerification(page)) {
-          throw new Error("captcha/verification detected");
-        }
-      } catch (e) {
-        console.warn("[stage2] variant failed, switching to variant4 direct link:", e);
-        await stage2Variant4DirectNavigate({
-          page,
-          channelTargetHref,
-          videoTargetHref,
-        });
-      }
-    }
-
-    /** Stage2: досмотр до случайной доли в [min,max] (см. resolveStage2VideoEndRatios). */
-    let stage2WatchOk = false;
-    if (runStage2) {
-      const { min: minR, max: maxR } = resolveStage2VideoEndRatios();
-      console.log(
-        `[stage2] target watch ratio range: ${minR}..${maxR} (STAGE2_VIDEO_END_MIN[_RATIO] / MAX[_RATIO] or VIDEO_END_*)`
-      );
-      stage2WatchOk = await waitForYoutubeVideoNearEndIfWatch(page, {
-        ratioMin: minR,
-        ratioMax: maxR,
-        ignoreVideoWatchSecLimits: true,
-      });
-    }
-    if (runStage2 && stage2WatchOk) {
-      await reportTeamTaskStatus(taskId, "completed");
-    } else if (runStage2 && !stage2WatchOk) {
-      console.warn(
-        "[stage2] целевой просмотр по заданным VIDEO_END_/STAGE2_VIDEO_END_ долям не достигнут — completed не отправляем"
-      );
-    }
+    const stage2WatchOk = await executeStage2({
+      runStage2,
+      stage2Name,
+      channelTargetHref,
+      channelMode,
+      videoTargetHref,
+      videoTargetName,
+      vkGroupUrl,
+      landingUrl,
+      typoRatio,
+      page,
+      input,
+      taskId,
+    });
 
     //не убирать! (пауза перед закрытием, если не ждали конец ролика)
     if (!videoNearEndDone && !(runStage2 && stage2WatchOk)) {

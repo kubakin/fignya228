@@ -57,11 +57,6 @@ function errorCooldownMs(): number {
   return Math.round(randFloat(1000, 5000));
 }
 
-function isHeadlessByEnv(): boolean {
-  const v = process.env.HEADLESS?.trim().toLowerCase();
-  return v === "true" || v === "1" || v === "yes";
-}
-
 function resumeDriftSec(): number {
   const mag = randFloat(1, 5);
   const sign = Math.random() < 0.5 ? -1 : 1;
@@ -480,16 +475,10 @@ export async function waitForYoutubeVideoNearEndIfWatch(
         driftSec: Number(driftSec.toFixed(2)),
       });
       await page.waitForTimeout(cd);
-      if (isHeadlessByEnv()) {
-        await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-      } else {
-        const reloadWay = await reloadViaNutJsWithFallback(page);
-        videoLog("перезагрузка через nut.js", { way: reloadWay });
-      }
-      if (!isHeadlessByEnv()) {
-        await page.waitForTimeout(randFloat(3000, 5000));
-        await seekApproxByNutJs(page, resumeRatio, driftSec);
-      }
+      const reloadWay = await reloadViaNutJsWithFallback(page);
+      videoLog("перезагрузка через nut.js", { way: reloadWay });
+      await page.waitForTimeout(randFloat(3000, 5000));
+      await seekApproxByNutJs(page, resumeRatio, driftSec);
       continue;
     } finally {
       clearInterval(tick);

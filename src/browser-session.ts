@@ -36,9 +36,7 @@ async function closeChromeServiceTabs(page: Page): Promise<void> {
 /**
  * Открывает страницу: либо новая вкладка в подключённом/постоянном контексте (общие cookie с профилем).
  */
-export async function createBrowserSession(
-  headless: boolean
-): Promise<BrowserSession> {
+export async function createBrowserSession(): Promise<BrowserSession> {
   const cdpUrl = envTrim("PLAYWRIGHT_CDP_URL");
   if (cdpUrl) {
     console.log(`[browser] connectOverCDP ${cdpUrl}`);
@@ -70,7 +68,7 @@ export async function createBrowserSession(
     const label = channel ?? "bundled-chromium";
     console.log(`[browser] launchPersistentContext dir=${userDataDir} channel=${label}`);
     const context = await chromium.launchPersistentContext(userDataDir, {
-      headless,
+      headless: false,
       ...(channel !== undefined ? { channel } : {}),
       viewport: null,
     });
@@ -83,7 +81,7 @@ export async function createBrowserSession(
     };
   }
 
-  const browser = await chromium.launch({ headless });
+  const browser = await chromium.launch({ headless: false });
   const page = await browser.newPage();
   return {
     page,

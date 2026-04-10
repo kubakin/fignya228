@@ -191,7 +191,6 @@ try {
   if ($UseChromeProfile) {
     $chromeProc = Start-ChromeForProfile -Port $ChromeDebugPort -UserDataDir $ChromeUserDataDir
     $env:PLAYWRIGHT_CDP_URL = "http://127.0.0.1:$ChromeDebugPort"
-    $env:HEADLESS = "false"
     Write-Step "Using existing Chrome profile via CDP: $($env:PLAYWRIGHT_CDP_URL)"
   }
 

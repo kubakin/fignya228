@@ -1,12 +1,10 @@
 /**
  * Ввод текста с переменными паузами и редкими «опечатками» (соседняя клавиша),
- * максимум ~5% позиций. Системный ввод — nut.js keyboard; в headless — Playwright.
+ * максимум ~5% позиций. Системный ввод — nut.js keyboard.
  */
 
 import { keyboard, sleep } from "@nut-tree-fork/nut-js";
 import { Key } from "@nut-tree-fork/shared";
-import { kStringMaxLength } from "node:buffer";
-import type { Page } from "playwright";
 
 function randFloat(lo: number, hi: number): number {
   return lo + Math.random() * (hi - lo);
@@ -162,60 +160,26 @@ export async function typeTextWithNut(
   }
 }
 
-/** После текста — Enter (системно через nut или в сфокусированное поле в Playwright). */
-export async function pressEnterAfterTyping(
-  page: Page,
-  useNutKeyboard: boolean
-): Promise<void> {
+/** После текста — Enter через системную клавиатуру nut.js. */
+export async function pressEnterAfterTyping(): Promise<void> {
   await sleep(randFloat(80, 260) * delayScale());
-  if (useNutKeyboard) {
-    keyboard.config.autoDelayMs = 0;
-    await keyboard.type(Key.Enter);
-  } else {
-    await page.keyboard.press("Enter");
-  }
+  keyboard.config.autoDelayMs = 0;
+  await keyboard.type(Key.Enter);
   await sleep(randFloat(45, 160) * delayScale());
 }
 
-/** Очистка сфокусированного поля (Ctrl/Cmd+A, затем Backspace). */
-export async function clearFocusedField(
-  page: Page
-): Promise<void> {
+/** Очистка сфокусированного поля системно (Ctrl/Cmd+A, затем Backspace). */
+export async function clearFocusedField(): Promise<void> {
   await sleep(randFloat(60, 180) * delayScale());
-  const combo = process.platform === "darwin" ? "Meta+A" : "Control+A";
-  await page.keyboard.press(combo);
-  await sleep(randFloat(40, 120) * delayScale());
-  await page.keyboard.press("Backspace");
-  await sleep(randFloat(50, 160) * delayScale());
-}
-
-export async function typeTextWithPlaywright(
-  page: Page,
-  text: string,
-  opts: HumanTypeOptions
-): Promise<void> {
-  const chars = [...text];
-  const maxTypos = maxTypoCount(chars.length, opts.typoRatio);
-  const typoAt = pickTypoIndices(chars, maxTypos);
-
-  for (let i = 0; i < chars.length; i++) {
-    const ch = chars[i]!;
-    if (typoAt.has(i)) {
-      const wrong = pickTypoNeighbor(ch);
-      if (wrong !== null) {
-        await page.keyboard.type(wrong);
-        await sleep(randFloat(140, 420) * delayScale());
-        await page.keyboard.press("Backspace");
-        await sleep(randFloat(80, 260) * delayScale());
-      }
-    }
-    if (ch === "\n") {
-      await page.keyboard.press("Enter");
-    } else {
-      await page.keyboard.type(ch);
-    }
-    await sleep(delayAfterChar(ch));
+  keyboard.config.autoDelayMs = 0;
+  if (process.platform === "darwin") {
+    await keyboard.type(Key.LeftSuper, Key.A);
+  } else {
+    await keyboard.type(Key.LeftControl, Key.A);
   }
+  await sleep(randFloat(40, 120) * delayScale());
+  await keyboard.type(Key.Backspace);
+  await sleep(randFloat(50, 160) * delayScale());
 }
 
 export function resolveTypoRatio(): number {
@@ -227,9 +191,3 @@ export function resolveTypoRatio(): number {
   return Math.min(n, 0.25);
 }
 
-export function shouldUseNutKeyboard(headless: boolean): boolean {
-  if (headless) return false;
-  const v = process.env.USE_SYSTEM_KEYBOARD?.trim().toLowerCase();
-  if (v === "false" || v === "0" || v === "no") return false;
-  return true;
-}

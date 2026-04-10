@@ -22,10 +22,9 @@ export function hasMultipleWords(text: string): boolean {
  * чтобы клик по подсказке шёл «в процессе» набора, а не в конце.
  */
 export function getPartialTypingSplitForSuggestion(
-  text: string,
-  headless: boolean
+  text: string
 ): { first: string; rest: string } | null {
-  if (headless || !hasMultipleWords(text)) return null;
+  if (!hasMultipleWords(text)) return null;
   const chars = [...text];
   if (chars.length < 2) return null;
   const frac = randFloat(0.5, 0.8);
@@ -39,10 +38,9 @@ export function getPartialTypingSplitForSuggestion(
 
 export async function maybeClickRandomYtSuggestion(
   page: Page,
-  text: string,
-  headless: boolean
+  text: string
 ): Promise<void> {
-  if (!hasMultipleWords(text) || headless) return;
+  if (!hasMultipleWords(text)) return;
 
   const sel =
     process.env.YT_SUGGESTION_OPTION_SELECTOR?.trim() || DEFAULT_OPTION_SELECTOR;
