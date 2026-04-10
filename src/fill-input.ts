@@ -249,6 +249,7 @@ function resolveStage2Strategy(opts: {
   vkGroupUrl?: string;
   landingUrl?: string;
 }): Stage2Strategy {
+  console.log('test')
   // return 'landingStrategy';
   const candidates: Array<{ strategy: Stage2Strategy; weight: number }> = [];
   const s1 = parseProb("STAGE2_STRATEGY_CHANNEL_SEARCH_PROB", parseProb("STAGE2_VARIANT1_PROB", 0.0));
@@ -397,6 +398,7 @@ async function stage2VkStrategy(opts: {
   });
   await nutSearchFromAddressBar(opts.vkGroupUrl);
   await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
+  await opts.page.waitForLoadState("load", { timeout: 60_000 }).catch(() => {});
   await sleep(randFloat(1000, 2200));
 
   console.log("[stage2][vkStrategy] initial human scroll");
