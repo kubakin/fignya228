@@ -249,7 +249,7 @@ function resolveStage2Strategy(opts: {
   vkGroupUrl?: string;
   landingUrl?: string;
 }): Stage2Strategy {
-  return 'landingStrategy';
+  // return 'landingStrategy';
   const candidates: Array<{ strategy: Stage2Strategy; weight: number }> = [];
   const s1 = parseProb("STAGE2_STRATEGY_CHANNEL_SEARCH_PROB", parseProb("STAGE2_VARIANT1_PROB", 0.0));
   const s2 = parseProb("STAGE2_STRATEGY_WEB_CHANNEL_PROB", parseProb("STAGE2_VARIANT2_PROB", 0.30));
