@@ -9,6 +9,28 @@ import { Point } from "@nut-tree-fork/shared";
 import type { Locator } from "playwright";
 import { humanLikePath, randFloat } from "./mouse-path.js";
 
+function easeOutCubic(t: number) {
+  return 1 - Math.pow(1 - t, 3);
+}
+
+function easeOutQuint(t: number) {
+  return 1 - Math.pow(1 - t, 5);
+}
+
+function easeInOutSine(t: number) {
+  return -(Math.cos(Math.PI * t) - 1) / 2;
+}
+
+function easeInOutCubic(t: number) {
+  return t < 0.5
+    ? 4 * t * t * t
+    : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+function choose<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
 function parseOffset(name: string): number {
   const v = process.env[name]?.trim();
   if (v === undefined || v === "") return 0;
@@ -138,21 +160,80 @@ export async function nutHumanMoveAndClickScreenPoint(
   sy: number
 ): Promise<void> {
   const end = {
-    x: Math.round(sx + parseOffset("MOUSE_OFFSET_X")),
-    y: Math.round(sy + parseOffset("MOUSE_OFFSET_Y")),
+    x: Math.round(sx),
+    y: Math.round(sy),
   };
+
   const start = await mouse.getPosition();
-  const raw = humanLikePath({ x: start.x, y: start.y }, end);
-  const points = raw.map((p) => new Point(p.x, p.y));
-  const base = Number(process.env.MOUSE_SPEED ?? "320");
-  const sp =
-    Number.isFinite(base) && base > 0 ? base * randFloat(0.82, 1.22) : 300;
-  const speedMul = stage2MouseSpeedMultiplier();
+
+  const raw = humanLikePath(
+    { x: start.x, y: start.y },
+    end
+  );
+
+  const points = raw.map(
+    (p) => new Point(Math.round(p.x), Math.round(p.y))
+  );
+
+  /** ================= SPEED FIX ================= */
+
+  const base = Number("2520"); // 🔥 быстрее
+
   mouse.config.mouseSpeed =
-    sp * speedMul * smoothSpeedMultiplier() * randFloat(0.96, 1.06);
+    base *
+    randFloat(1.05, 1.35) * // 🔥 ускорили базу
+    stage2MouseSpeedMultiplier() *
+    smoothSpeedMultiplier();
+
   mouse.config.autoDelayMs = 0;
-  // Непрерывный проход по траектории выглядит гораздо плавнее, чем покадровые шаги с паузами.
-  await mouse.move(points);
-  await sleep(randFloat(200, 500));
+
+  /** ================= MOVE (SMOOTHER) ================= */
+
+  const len = points.length;
+
+  for (let i = 0; i < len; i++) {
+    const p = points[i];
+
+    // 🔥 jitter ТОЛЬКО в финальной трети
+    let final = p;
+
+    if (i > len * 0.7 && i < len - 2) {
+      final = new Point(
+        Math.round(p.x + randFloat(-0.8, 0.8)),
+        Math.round(p.y + randFloat(-0.8, 0.8))
+      );
+    }
+
+    await mouse.move([final]);
+
+    // 🔥 быстрее в целом
+    const t = i / (len - 1);
+    const delay =
+      1 +
+      Math.pow(1 - t, 2) * 6 + // мягкое замедление
+      Math.random() * 1.5;
+
+    await sleep(delay);
+  }
+
+  /** ================= FINAL SNAP ================= */
+
+  // 🔥 одна чистая коррекция в конце (ВАЖНО)
+  await mouse.move([
+    new Point(
+      Math.round(end.x + randFloat(-1.5, 1.5)),
+      Math.round(end.y + randFloat(-1.5, 1.5))
+    ),
+  ]);
+
+  await sleep(randFloat(60, 160));
+
+  /** ================= CLICK ================= */
+
   await mouse.leftClick();
+
+  if (Math.random() < 0.04) {
+    await sleep(randFloat(40, 120));
+    await mouse.leftClick();
+  }
 }

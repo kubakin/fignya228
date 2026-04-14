@@ -94,7 +94,8 @@ async function clickRandomVisibleWatchVideo(
         n.closest("ytd-display-ad-renderer") ||
         n.closest("ytd-promoted-sparkles-web-renderer") ||
         n.closest("ytd-promoted-video-renderer") ||
-        n.closest("[data-ad-impressions]")
+        n.closest("[data-ad-impressions]") ||
+        n.closest("ad-button-hover-overlay-view-model")
       ) {
         continue;
       }

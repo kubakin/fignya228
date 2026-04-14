@@ -1,4 +1,4 @@
-/** Общая «человеческая» траектория курсора (Bezier + джиттер). */
+/** ================== UTILS ================== */
 
 export function randFloat(lo: number, hi: number): number {
   return lo + Math.random() * (hi - lo);
@@ -52,6 +52,8 @@ function randomVectorOnLine(a: Pt, b: Pt): Pt {
   return add(a, mult(vec, Math.random()));
 }
 
+/** ================== BEZIER ================== */
+
 function cubicPoint(p0: Pt, p1: Pt, p2: Pt, p3: Pt, t: number): Pt {
   const u = 1 - t;
   const tt = t * t;
@@ -72,11 +74,13 @@ function randomNormalLine(a: Pt, b: Pt, range: number): [Pt, Pt] {
 
 function generateBezierAnchors(a: Pt, b: Pt, spread: number): [Pt, Pt] {
   const side = Math.random() < 0.5 ? -1 : 1;
+
   const calc = (): Pt => {
     const [randMid, normal] = randomNormalLine(a, b, spread);
     const choice = mult(normal, side);
     return randomVectorOnLine(randMid, add(randMid, choice));
   };
+
   const p1 = calc();
   const p2 = calc();
   return p1.x <= p2.x ? [p1, p2] : [p2, p1];
@@ -85,15 +89,18 @@ function generateBezierAnchors(a: Pt, b: Pt, spread: number): [Pt, Pt] {
 function bezierLength(p0: Pt, p1: Pt, p2: Pt, p3: Pt): number {
   let len = 0;
   let prev = p0;
-  const samples = 45;
-  for (let i = 1; i <= samples; i++) {
-    const t = i / samples;
+
+  for (let i = 1; i <= 45; i++) {
+    const t = i / 45;
     const cur = cubicPoint(p0, p1, p2, p3, t);
     len += magnitude(sub(cur, prev));
     prev = cur;
   }
+
   return len;
 }
+
+/** ================== HUMAN MODEL ================== */
 
 function fitts(distance: number, width: number): number {
   return 2 * Math.log2(distance / width + 1);
@@ -109,6 +116,8 @@ function overshootPoint(to: Pt, radius: number): Pt {
   return add(to, { x: r * Math.cos(a), y: r * Math.sin(a) });
 }
 
+/** ================== PATH ================== */
+
 type SegmentOptions = {
   spreadOverride?: number;
   moveSpeed?: number;
@@ -118,53 +127,96 @@ function segmentPath(start: Pt, end: Pt, opts: SegmentOptions = {}): Pt[] {
   const width = 100;
   const minSpread = 2;
   const maxSpread = 200;
-  const vec = direction(start, end);
-  const dist = magnitude(vec);
+
+  const dist = magnitude(direction(start, end));
   const spread = opts.spreadOverride ?? clamp(dist, minSpread, maxSpread);
+
   const [a1, a2] = generateBezierAnchors(start, end, spread);
   const length = bezierLength(start, a1, a2, end) * 0.8;
 
   const moveSpeed =
-    opts.moveSpeed !== undefined && opts.moveSpeed > 0
+    opts.moveSpeed && opts.moveSpeed > 0
       ? opts.moveSpeed
       : randFloat(0.7, 1.7);
+
   const speed = 25 / moveSpeed;
-  const minSteps = 25;
-  const baseTime = speed * minSteps;
+  const baseTime = speed * 25;
+
   const steps = Math.max(
-    8,
+    10,
     Math.ceil((Math.log2(fitts(length, width) + 1) + baseTime) * 3)
   );
 
   const out: Pt[] = [];
+
   for (let i = 0; i < steps; i++) {
     const t = i / (steps - 1);
     const p = cubicPoint(start, a1, a2, end, t);
-    out.push({ x: Math.max(0, Math.round(p.x)), y: Math.max(0, Math.round(p.y)) });
+
+    out.push({
+      x: Math.round(p.x),
+      y: Math.round(p.y),
+    });
   }
+
   return out;
 }
 
-function easeLinear(t: number): number {
-  return t;
-}
-function easeOutCubic(t: number): number {
+/** ================== EASING ================== */
+
+function easeOutCubic(t: number) {
   return 1 - (1 - t) ** 3;
 }
-function easeOutQuint(t: number): number {
+
+function easeOutQuint(t: number) {
   return 1 - (1 - t) ** 5;
 }
-function easeInOutSine(t: number): number {
+
+function easeInOutSine(t: number) {
   return -(Math.cos(Math.PI * t) - 1) / 2;
 }
-function easeInOutCubic(t: number): number {
+
+function easeInOutCubic(t: number) {
   return t < 0.5 ? 4 * t ** 3 : 1 - (-2 * t + 2) ** 3 / 2;
 }
 
-export function dedupeConsecutive(
-  pts: { x: number; y: number }[]
-): { x: number; y: number }[] {
-  const out: { x: number; y: number }[] = [];
+function pickEasing() {
+  return choose([
+    easeOutCubic,
+    easeOutQuint,
+    easeInOutSine,
+    easeInOutCubic,
+  ]);
+}
+
+function buildDelays(count: number): number[] {
+  const easing = pickEasing();
+  const delays: number[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const t = i / (count - 1);
+    const e = easing(t);
+
+    const base = 2 + (1 - e) * 10;
+    delays.push(base + Math.random() * 4);
+  }
+
+  return delays;
+}
+
+/** ================== JITTER ================== */
+
+function jitter(p: Pt): Pt {
+  return {
+    x: p.x + (Math.random() - 0.5) * 1.5,
+    y: p.y + (Math.random() - 0.5) * 1.5,
+  };
+}
+
+/** ================== PUBLIC ================== */
+
+export function dedupeConsecutive(pts: Pt[]): Pt[] {
+  const out: Pt[] = [];
   for (const p of pts) {
     const last = out[out.length - 1];
     if (!last || last.x !== p.x || last.y !== p.y) out.push(p);
@@ -172,28 +224,46 @@ export function dedupeConsecutive(
   return out;
 }
 
-export function humanLikePath(
-  from: { x: number; y: number },
-  to: { x: number; y: number }
-): { x: number; y: number }[] {
-  const start = { x: from.x, y: from.y };
-  const end = { x: to.x, y: to.y };
-  if (magnitude(sub(end, start)) < 2) return [from, to];
-
+export function humanLikePath(from: Pt, to: Pt): Pt[] {
   const threshold = Number(process.env.MOUSE_OVERSHOOT_THRESHOLD ?? 500);
   const radius = Number(process.env.MOUSE_OVERSHOOT_RADIUS ?? 120);
-  const overshootSpread = Number(process.env.MOUSE_OVERSHOOT_SPREAD ?? 10);
-  const canOvershoot =
-    Number.isFinite(threshold) &&
-    Number.isFinite(radius) &&
-    Number.isFinite(overshootSpread) &&
-    shouldOvershoot(start, end, threshold);
+  const spread = Number(process.env.MOUSE_OVERSHOOT_SPREAD ?? 10);
 
-  if (canOvershoot) {
-    const over = overshootPoint(end, radius);
-    const p1 = segmentPath(start, over);
-    const p2 = segmentPath(over, end, { spreadOverride: overshootSpread });
+  const base = segmentPath(from, to);
+
+  if (shouldOvershoot(from, to, threshold)) {
+    const over = overshootPoint(to, radius);
+
+    const p1 = segmentPath(from, over);
+    const p2 = segmentPath(over, to, {
+      spreadOverride: spread,
+      moveSpeed: randFloat(1.2, 2.2), // быстрее возврат
+    });
+
     return dedupeConsecutive([...p1, ...p2]);
   }
-  return dedupeConsecutive(segmentPath(start, end));
+
+  return dedupeConsecutive(base);
+}
+
+/** ================== MOUSE ================== */
+
+export async function moveMouseHuman(
+  page: any,
+  from: Pt,
+  to: Pt
+) {
+  const path = humanLikePath(from, to);
+  const delays = buildDelays(path.length);
+
+  for (let i = 0; i < path.length; i++) {
+    let p = path[i];
+
+    if (i < path.length - 1) {
+      p = jitter(p);
+    }
+
+    await page.mouse.move(p.x, p.y);
+    await page.waitForTimeout(delays[i]);
+  }
 }
