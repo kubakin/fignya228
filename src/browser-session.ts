@@ -33,6 +33,33 @@ async function closeChromeServiceTabs(page: Page): Promise<void> {
   }
 }
 
+async function closeExtraPagesKeepFirst(context: { pages(): Page[] }): Promise<Page> {
+  const pages = context.pages();
+  let main = pages[0];
+  if (!main) {
+    throw new Error("No pages available to keep as main tab");
+  }
+  for (let i = 1; i < pages.length; i++) {
+    try {
+      await pages[i]!.close({ runBeforeUnload: false });
+    } catch {
+      // ignore
+    }
+  }
+  return main;
+}
+
+async function closeAllPages(context: { pages(): Page[] }): Promise<void> {
+  const pages = context.pages();
+  for (const p of pages) {
+    try {
+      await p.close({ runBeforeUnload: false });
+    } catch {
+      // ignore
+    }
+  }
+}
+
 /**
  * Открывает страницу: либо новая вкладка в подключённом/постоянном контексте (общие cookie с профилем).
  */
@@ -51,10 +78,16 @@ export async function createBrowserSession(): Promise<BrowserSession> {
     for (const p of existing) {
       await closeChromeServiceTabs(p);
     }
-    const page = await context.newPage();
+    let page: Page;
+    if (context.pages().length === 0) {
+      page = await context.newPage();
+    } else {
+      page = await closeExtraPagesKeepFirst(context);
+    }
     return {
       page,
       close: async () => {
+        await closeAllPages(context);
         await browser.close();
       },
     };
@@ -72,7 +105,10 @@ export async function createBrowserSession(): Promise<BrowserSession> {
       ...(channel !== undefined ? { channel } : {}),
       viewport: null,
     });
-    const page = await context.newPage();
+    const page = context.pages()[0] ?? (await context.newPage());
+    if (context.pages().length > 1) {
+      await closeExtraPagesKeepFirst(context);
+    }
     return {
       page,
       close: async () => {
