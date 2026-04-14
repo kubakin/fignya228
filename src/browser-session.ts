@@ -6,6 +6,9 @@
  */
 
 import { chromium, type Page } from "playwright";
+import { keyboard, sleep } from "@nut-tree-fork/nut-js";
+import { Key } from "@nut-tree-fork/shared";
+import { nutHumanMoveAndClickScreenPoint } from "./nut-move-click.js";
 
 export type BrowserSession = {
   page: Page;
@@ -60,6 +63,70 @@ async function closeAllPages(context: { pages(): Page[] }): Promise<void> {
   }
 }
 
+async function isWindowMaximized(page: Page): Promise<boolean> {
+  return page.evaluate(function () {
+    const dw = Math.abs(window.outerWidth - screen.availWidth);
+    const dh = Math.abs(window.outerHeight - screen.availHeight);
+    return dw <= 16 && dh <= 16;
+  });
+}
+
+async function resolveWindowsMaximizeButtonPoint(
+  page: Page
+): Promise<{ x: number; y: number } | null> {
+  return page.evaluate(function () {
+    if (typeof window.screenX !== "number" || typeof window.screenY !== "number") {
+      return null;
+    }
+    // Typical Windows caption buttons are on top-right:
+    // [minimize][maximize][close], each ~46px wide on 100% scale.
+    const closeBtnWidth = 46;
+    const x = Math.round(window.screenX + window.outerWidth - closeBtnWidth * 1.5);
+    const y = Math.round(window.screenY + 14);
+    return { x, y };
+  });
+}
+
+async function ensureWindowMaximized(page: Page): Promise<void> {
+  if (await isWindowMaximized(page)) return;
+  keyboard.config.autoDelayMs = 0;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await page.bringToFront().catch(() => {});
+    await sleep(220);
+
+    if (process.platform === "win32") {
+      const p = await resolveWindowsMaximizeButtonPoint(page);
+      if (p) {
+        console.log(`[browser] maximize attempt ${attempt}: click caption maximize button`);
+        await nutHumanMoveAndClickScreenPoint(p.x, p.y);
+        await sleep(850);
+        if (await isWindowMaximized(page)) return;
+      }
+
+      console.log(`[browser] maximize attempt ${attempt}: Alt+Space then X`);
+      await keyboard.type(Key.LeftAlt, Key.Space);
+      await sleep(180);
+      await keyboard.type("x");
+      await sleep(750);
+      if (await isWindowMaximized(page)) return;
+
+      console.log(`[browser] maximize attempt ${attempt}: Win+Up`);
+      await keyboard.type(Key.LeftSuper, Key.Up);
+      await sleep(650);
+      if (await isWindowMaximized(page)) return;
+      continue;
+    }
+
+    // Non-Windows fallback.
+    await keyboard.type(Key.F11);
+    await sleep(700);
+    if (await isWindowMaximized(page)) return;
+  }
+
+  console.warn("[browser] failed to maximize window after retries");
+}
+
 /**
  * Открывает страницу: либо новая вкладка в подключённом/постоянном контексте (общие cookie с профилем).
  */
@@ -84,6 +151,7 @@ export async function createBrowserSession(): Promise<BrowserSession> {
     } else {
       page = await closeExtraPagesKeepFirst(context);
     }
+    await ensureWindowMaximized(page);
     return {
       page,
       close: async () => {
@@ -109,6 +177,7 @@ export async function createBrowserSession(): Promise<BrowserSession> {
     if (context.pages().length > 1) {
       await closeExtraPagesKeepFirst(context);
     }
+    await ensureWindowMaximized(page);
     return {
       page,
       close: async () => {
@@ -119,6 +188,7 @@ export async function createBrowserSession(): Promise<BrowserSession> {
 
   const browser = await chromium.launch({ headless: false });
   const page = await browser.newPage();
+  await ensureWindowMaximized(page);
   return {
     page,
     close: async () => {
