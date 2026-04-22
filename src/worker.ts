@@ -397,6 +397,7 @@ async function runFillForTask(task: TaskPayload): Promise<number> {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
     safeEnv[k] = String(v);
   }
+  safeEnv.REUSE_LAST_WATCH_PAGE = "1";
 
   const child =
     process.platform === "win32"
@@ -459,15 +460,23 @@ async function main(): Promise<void> {
       if (now >= nextTaskAt) {
         busy = true;
         const task = await fetchTask();
-        nextTaskAt = Date.now() + pollMs;
+        let runExitCode = 1;
         if (!task) {
           console.log("[worker] no task");
+          nextTaskAt = Date.now() + pollMs;
         } else {
           const taskType = (task.type ?? "").trim().toLowerCase();
           if (taskType === "test") {
-            await runTestForTask(task);
+            runExitCode = await runTestForTask(task);
           } else {
-            await runFillForTask(task);
+            runExitCode = await runFillForTask(task);
+          }
+          if (runExitCode === 0) {
+            // Success: pull next task immediately.
+            nextTaskAt = Date.now();
+          } else {
+            // Failed task: back off to regular poll interval.
+            nextTaskAt = Date.now() + pollMs;
           }
         }
         busy = false;

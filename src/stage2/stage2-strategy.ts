@@ -40,7 +40,7 @@ function pickWeightedStrategy(
 export function resolveStage2Strategy(
   opts: ResolveStage2StrategyOptions
 ): Stage2Strategy {
-  // return 'channelSearchStrategy'
+  // return 'directLinkStrategy'
   const candidates: Array<{ strategy: Stage2Strategy; weight: number }> = [];
   const s1 = parseProb("STAGE2_STRATEGY_CHANNEL_SEARCH_PROB", parseProb("STAGE2_VARIANT1_PROB", 0.0));
   // const s2 = parseProb("STAGE2_STRATEGY_WEB_CHANNEL_PROB", parseProb("STAGE2_VARIANT2_PROB", 0.3));

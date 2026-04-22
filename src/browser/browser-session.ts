@@ -217,7 +217,11 @@ export async function createBrowserSession(): Promise<BrowserSession> {
       return {
         page,
         close: async () => {
-          await closeAllPages(context);
+          const keepLastWatchPage =
+            (process.env.REUSE_LAST_WATCH_PAGE ?? "").trim() === "1";
+          if (!keepLastWatchPage) {
+            await closeAllPages(context);
+          }
           await browser.close();
         },
       };

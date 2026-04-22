@@ -120,6 +120,11 @@ function postLoadDelayMs(): number {
   return randFloat(lo, hi);
 }
 
+function envMs(name: string, fallback: number): number {
+  const v = Number(process.env[name]?.trim());
+  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : fallback;
+}
+
 async function moveCursorAndClickToFocus(
   _page: Page,
   locator: Locator
@@ -281,6 +286,75 @@ async function findAndClickVisibleSearchLink(page: Page, opts: {
     await sleep(randFloat(600, 1400));
   }
 
+  return false;
+}
+
+function extractYoutubeVideoId(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const u = new URL(raw);
+    if (u.hostname.includes("youtu.be")) return u.pathname.replace("/", "").trim() || undefined;
+    const v = u.searchParams.get("v")?.trim();
+    return v || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function tryOpenTargetFromSidebarSuggestions(opts: {
+  page: Page;
+  videoTargetHref: string;
+  timeoutMs: number;
+}): Promise<boolean> {
+  const targetHref = opts.videoTargetHref.trim().toLowerCase();
+  if (!targetHref) return false;
+  const targetId = extractYoutubeVideoId(opts.videoTargetHref)?.toLowerCase();
+  const started = Date.now();
+  while (Date.now() - started < opts.timeoutMs) {
+    const idx = await opts.page.evaluate(
+      ({ hrefNeedle, videoId }: { hrefNeedle: string; videoId?: string }) => {
+        const selectors = [
+          "ytd-watch-next-secondary-results-renderer a#video-title",
+          "ytd-compact-video-renderer a#video-title",
+          "#secondary a#video-title",
+        ];
+        const links = document.querySelectorAll(selectors.join(","));
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        for (let i = 0; i < links.length; i++) {
+          const a = links[i] as HTMLAnchorElement;
+          const href = (a.href || a.getAttribute("href") || "").toLowerCase();
+          if (!href) continue;
+          const r = a.getBoundingClientRect();
+          const intersects =
+            r.width > 0 &&
+            r.height > 0 &&
+            r.bottom > 0 &&
+            r.right > 0 &&
+            r.left < vw &&
+            r.top < vh;
+          if (!intersects) continue;
+          const byHref = hrefNeedle.length > 0 && href.includes(hrefNeedle);
+          const byVideoId = !!videoId && href.includes(`v=${videoId}`);
+          if (byHref || byVideoId) return i;
+        }
+        return -1;
+      },
+      { hrefNeedle: targetHref, videoId: targetId }
+    );
+    if (idx >= 0) {
+      const link = opts.page
+        .locator(
+          "ytd-watch-next-secondary-results-renderer a#video-title, ytd-compact-video-renderer a#video-title, #secondary a#video-title"
+        )
+        .nth(idx);
+      await link.scrollIntoViewIfNeeded();
+      await nutHumanMoveAndClick(link);
+      await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
+      return true;
+    }
+    await sleep(randFloat(350, 800));
+  }
   return false;
 }
 
@@ -495,8 +569,10 @@ async function main(): Promise<void> {
   const landingUrl = process.env.LANDING_URL?.trim();
   const taskId = process.env.TASK_ID ?? process.env.TASKID;
   const text = args.text ?? process.env.TEXT ?? "Hello world";
+  const reuseLastWatchPage = true
+  const sidebarPickTimeoutMs = envMs("STAGE2_SIDEBAR_PICK_TIMEOUT_MS", 12_000);
 
-  // ensurePlaywrightBrowsersIfNeeded();
+  ensurePlaywrightBrowsersIfNeeded();
 
   // if (!url || !selector) {
   //   console.error(
@@ -509,6 +585,37 @@ async function main(): Promise<void> {
 
   const { page, close } = await createBrowserSession();
   try {
+    const currentUrl = page.url();
+    const canTrySidebarFastPath =
+      reuseLastWatchPage &&
+      runStage2 &&
+      !!videoTargetHref &&
+      /youtube\.com\/watch\?v=/.test(currentUrl);
+    if (canTrySidebarFastPath) {
+      console.log("[stage2] trying sidebar fast-path for next task");
+      const openedFromSidebar = await tryOpenTargetFromSidebarSuggestions({
+        page,
+        videoTargetHref: videoTargetHref!,
+        timeoutMs: sidebarPickTimeoutMs,
+      });
+      if (openedFromSidebar) {
+        console.log("[stage2] sidebar fast-path hit, skip strategy selection");
+        await ensureVideoPlayingIfPaused(page);
+        const { min: minR, max: maxR } = resolveStage2VideoEndRatios();
+        const stage2WatchOk = await waitForYoutubeVideoNearEndIfWatch(page, {
+          ratioMin: minR,
+          ratioMax: maxR,
+          ignoreVideoWatchSecLimits: true,
+        });
+        if (stage2WatchOk) {
+          await reportTeamTaskStatus(taskId, "completed");
+          return;
+        }
+      } else {
+        console.log("[stage2] sidebar fast-path miss, fallback to standard logic");
+      }
+    }
+
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
     await sleep(postLoadDelayMs());
     const input = page.locator(selector).first();
