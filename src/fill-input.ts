@@ -599,6 +599,7 @@ async function main(): Promise<void> {
         timeoutMs: sidebarPickTimeoutMs,
       });
       if (openedFromSidebar) {
+        console.log("[chain] sidebar hit: open next video from suggestions");
         console.log("[stage2] sidebar fast-path hit, skip strategy selection");
         await ensureVideoPlayingIfPaused(page);
         const { min: minR, max: maxR } = resolveStage2VideoEndRatios();
@@ -608,10 +609,12 @@ async function main(): Promise<void> {
           ignoreVideoWatchSecLimits: true,
         });
         if (stage2WatchOk) {
+          console.log("[chain] next watched done (sidebar path)");
           await reportTeamTaskStatus(taskId, "completed");
           return;
         }
       } else {
+        console.log("[chain] sidebar miss: fallback to standard strategy flow");
         console.log("[stage2] sidebar fast-path miss, fallback to standard logic");
       }
     }
@@ -651,6 +654,12 @@ async function main(): Promise<void> {
     //не убирать! (пауза перед закрытием, если не ждали конец ролика)
     if (!videoNearEndDone && !(runStage2 && stage2WatchOk)) {
       await page.waitForTimeout(15000);
+    }
+    if (videoNearEndDone) {
+      console.log("[chain] previous watched done");
+    }
+    if (stage2WatchOk) {
+      console.log("[chain] next watched done");
     }
     console.log(`Введено "${text}" в ${selector} на ${url}`);
   } finally {
