@@ -9,8 +9,13 @@ import { chromium, type Page } from "playwright";
 import { keyboard, sleep } from "@nut-tree-fork/nut-js";
 import { Key } from "@nut-tree-fork/shared";
 import { nutHumanMoveAndClickScreenPoint } from "./nut-move-click.js";
-import path from "path";
-import fs from "fs";
+import path from "node:path";
+import fs from "node:fs";
+export type BrowserSession = {
+  page: Page;
+  close: () => Promise<void>;
+};
+
 function fileExists(p: string): boolean {
   try {
     return fs.existsSync(p);
@@ -19,9 +24,8 @@ function fileExists(p: string): boolean {
   }
 }
 
-export function getChromeExecutablePath(): string {
+function getChromeExecutablePath(): string {
   const platform = process.platform;
-
   const candidates: string[] = [];
 
   if (platform === "darwin") {
@@ -29,23 +33,16 @@ export function getChromeExecutablePath(): string {
       "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
       "/Applications/Chromium.app/Contents/MacOS/Chromium"
     );
-  }
-
-  if (platform === "win32") {
-    const programFiles = process.env["PROGRAMFILES"] || "C:\\Program Files";
-    const programFilesx86 = process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)";
-    const localAppData = process.env["LOCALAPPDATA"];
-
+  } else if (platform === "win32") {
+    const programFiles = process.env.PROGRAMFILES || "C:\\Program Files";
+    const programFilesX86 = process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)";
+    const localAppData = process.env.LOCALAPPDATA || "";
     candidates.push(
       path.join(programFiles, "Google/Chrome/Application/chrome.exe"),
-      path.join(programFilesx86, "Google/Chrome/Application/chrome.exe"),
-      localAppData
-        ? path.join(localAppData, "Google/Chrome/Application/chrome.exe")
-        : ""
+      path.join(programFilesX86, "Google/Chrome/Application/chrome.exe"),
+      localAppData ? path.join(localAppData, "Google/Chrome/Application/chrome.exe") : ""
     );
-  }
-
-  if (platform === "linux") {
+  } else {
     candidates.push(
       "/usr/bin/google-chrome",
       "/usr/bin/google-chrome-stable",
@@ -56,19 +53,13 @@ export function getChromeExecutablePath(): string {
 
   for (const candidate of candidates) {
     if (candidate && fileExists(candidate)) {
-      console.log(`[browser] using executablePath: ${candidate}`);
       return candidate;
     }
   }
-
   throw new Error(
     `Chrome executable not found. Tried:\n${candidates.filter(Boolean).join("\n")}`
   );
 }
-export type BrowserSession = {
-  page: Page;
-  close: () => Promise<void>;
-};
 
 function envTrim(name: string): string | undefined {
   const v = process.env[name]?.trim();
@@ -203,23 +194,71 @@ async function ensureWindowMaximized(page: Page): Promise<void> {
  */
 
 export async function createBrowserSession(): Promise<BrowserSession> {
+  const cdpUrl = envTrim("PLAYWRIGHT_CDP_URL");
+  if (cdpUrl) {
+    console.log(`[browser] connectOverCDP ${cdpUrl}`);
+    try {
+      const browser = await chromium.connectOverCDP(cdpUrl);
+      const context = browser.contexts()[0];
+      if (!context) {
+        throw new Error(
+          "CDP: у браузера нет контекста. Запустите Chrome с --remote-debugging-port=..."
+        );
+      }
+      const existing = context.pages();
+      for (const p of existing) {
+        await closeChromeServiceTabs(p);
+      }
+      const page = context.pages()[0] ?? (await context.newPage());
+      if (context.pages().length > 1) {
+        await closeExtraPagesKeepFirst(context);
+      }
+      await ensureWindowMaximized(page);
+      return {
+        page,
+        close: async () => {
+          await closeAllPages(context);
+          await browser.close();
+        },
+      };
+    } catch (e) {
+      console.warn("[browser] connectOverCDP failed, fallback to local Chrome launch:", e);
+    }
+  }
+
+  const userDataDir = envTrim("PLAYWRIGHT_USER_DATA_DIR") ?? defaultChromeUserDataDir();
+  if (userDataDir) {
+    const ch = envTrim("PLAYWRIGHT_BROWSER_CHANNEL");
+    const channel =
+      ch === "chrome" || ch === "msedge" || ch === "chromium" ? ch : "chrome";
+    console.log(`[browser] launchPersistentContext dir=${userDataDir} channel=${channel}`);
+    const context = await chromium.launchPersistentContext(userDataDir, {
+      headless: false,
+      channel,
+      viewport: null,
+    });
+    const page = context.pages()[0] ?? (await context.newPage());
+    if (context.pages().length > 1) {
+      await closeExtraPagesKeepFirst(context);
+    }
+    await ensureWindowMaximized(page);
+    return {
+      page,
+      close: async () => {
+        await context.close();
+      },
+    };
+  }
+
   const executablePath = getChromeExecutablePath();
-
-  console.log(`[browser] launch via executablePath: ${executablePath}`);
-
+  console.log(`[browser] fallback launch executablePath=${executablePath}`);
   const browser = await chromium.launch({
     headless: false,
     executablePath,
   });
-
-  const context = await browser.newContext({
-    viewport: null,
-  });
-
-  const page: Page = await context.newPage();
-
+  const context = await browser.newContext({ viewport: null });
+  const page = await context.newPage();
   await ensureWindowMaximized(page);
-
   return {
     page,
     close: async () => {
