@@ -9,18 +9,61 @@ import { chromium, type Page } from "playwright";
 import { keyboard, sleep } from "@nut-tree-fork/nut-js";
 import { Key } from "@nut-tree-fork/shared";
 import { nutHumanMoveAndClickScreenPoint } from "./nut-move-click.js";
-
-function getChromeExecutablePath(): string {
-  switch (process.platform) {
-    case "darwin":
-      return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-    case "win32":
-      return "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe";
-    case "linux":
-      return "/usr/bin/google-chrome";
-    default:
-      throw new Error(`Unsupported platform: ${process.platform}`);
+import path from "path";
+import fs from "fs";
+function fileExists(p: string): boolean {
+  try {
+    return fs.existsSync(p);
+  } catch {
+    return false;
   }
+}
+
+export function getChromeExecutablePath(): string {
+  const platform = process.platform;
+
+  const candidates: string[] = [];
+
+  if (platform === "darwin") {
+    candidates.push(
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium"
+    );
+  }
+
+  if (platform === "win32") {
+    const programFiles = process.env["PROGRAMFILES"] || "C:\\Program Files";
+    const programFilesx86 = process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)";
+    const localAppData = process.env["LOCALAPPDATA"];
+
+    candidates.push(
+      path.join(programFiles, "Google/Chrome/Application/chrome.exe"),
+      path.join(programFilesx86, "Google/Chrome/Application/chrome.exe"),
+      localAppData
+        ? path.join(localAppData, "Google/Chrome/Application/chrome.exe")
+        : ""
+    );
+  }
+
+  if (platform === "linux") {
+    candidates.push(
+      "/usr/bin/google-chrome",
+      "/usr/bin/google-chrome-stable",
+      "/usr/bin/chromium",
+      "/usr/bin/chromium-browser"
+    );
+  }
+
+  for (const candidate of candidates) {
+    if (candidate && fileExists(candidate)) {
+      console.log(`[browser] using executablePath: ${candidate}`);
+      return candidate;
+    }
+  }
+
+  throw new Error(
+    `Chrome executable not found. Tried:\n${candidates.filter(Boolean).join("\n")}`
+  );
 }
 export type BrowserSession = {
   page: Page;
