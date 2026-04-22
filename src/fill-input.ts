@@ -496,7 +496,7 @@ async function main(): Promise<void> {
   const taskId = process.env.TASK_ID ?? process.env.TASKID;
   const text = args.text ?? process.env.TEXT ?? "Hello world";
 
-  ensurePlaywrightBrowsersIfNeeded();
+  // ensurePlaywrightBrowsersIfNeeded();
 
   // if (!url || !selector) {
   //   console.error(

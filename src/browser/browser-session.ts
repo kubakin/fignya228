@@ -10,6 +10,18 @@ import { keyboard, sleep } from "@nut-tree-fork/nut-js";
 import { Key } from "@nut-tree-fork/shared";
 import { nutHumanMoveAndClickScreenPoint } from "./nut-move-click.js";
 
+function getChromeExecutablePath(): string {
+  switch (process.platform) {
+    case "darwin":
+      return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+    case "win32":
+      return "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe";
+    case "linux":
+      return "/usr/bin/google-chrome";
+    default:
+      throw new Error(`Unsupported platform: ${process.platform}`);
+  }
+}
 export type BrowserSession = {
   page: Page;
   close: () => Promise<void>;
@@ -18,6 +30,22 @@ export type BrowserSession = {
 function envTrim(name: string): string | undefined {
   const v = process.env[name]?.trim();
   return v === undefined || v === "" ? undefined : v;
+}
+
+function defaultChromeUserDataDir(): string | undefined {
+  if (process.platform === "win32") {
+    const local = process.env.LOCALAPPDATA?.trim();
+    if (!local) return undefined;
+    return `${local}\\Google\\Chrome\\User Data`;
+  }
+  if (process.platform === "darwin") {
+    const home = process.env.HOME?.trim();
+    if (!home) return undefined;
+    return `${home}/Library/Application Support/Google/Chrome`;
+  }
+  const home = process.env.HOME?.trim();
+  if (!home) return undefined;
+  return `${home}/.config/google-chrome`;
 }
 
 async function closeChromeServiceTabs(page: Page): Promise<void> {
@@ -130,68 +158,29 @@ async function ensureWindowMaximized(page: Page): Promise<void> {
 /**
  * Открывает страницу: либо новая вкладка в подключённом/постоянном контексте (общие cookie с профилем).
  */
+
 export async function createBrowserSession(): Promise<BrowserSession> {
-  const cdpUrl = envTrim("PLAYWRIGHT_CDP_URL");
-  if (cdpUrl) {
-    console.log(`[browser] connectOverCDP ${cdpUrl}`);
-    const browser = await chromium.connectOverCDP(cdpUrl);
-    const context = browser.contexts()[0];
-    if (!context) {
-      throw new Error(
-        "CDP: у браузера нет контекста. Запустите Chrome с --remote-debugging-port=..."
-      );
-    }
-    const existing = context.pages();
-    for (const p of existing) {
-      await closeChromeServiceTabs(p);
-    }
-    let page: Page;
-    if (context.pages().length === 0) {
-      page = await context.newPage();
-    } else {
-      page = await closeExtraPagesKeepFirst(context);
-    }
-    await ensureWindowMaximized(page);
-    return {
-      page,
-      close: async () => {
-        await closeAllPages(context);
-        await browser.close();
-      },
-    };
-  }
+  const executablePath = getChromeExecutablePath();
 
-  const userDataDir = envTrim("PLAYWRIGHT_USER_DATA_DIR");
-  if (userDataDir) {
-    const ch = envTrim("PLAYWRIGHT_BROWSER_CHANNEL");
-    const channel =
-      ch === "chrome" || ch === "msedge" || ch === "chromium" ? ch : undefined;
-    const label = channel ?? "bundled-chromium";
-    console.log(`[browser] launchPersistentContext dir=${userDataDir} channel=${label}`);
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: false,
-      ...(channel !== undefined ? { channel } : {}),
-      viewport: null,
-    });
-    const page = context.pages()[0] ?? (await context.newPage());
-    if (context.pages().length > 1) {
-      await closeExtraPagesKeepFirst(context);
-    }
-    await ensureWindowMaximized(page);
-    return {
-      page,
-      close: async () => {
-        await context.close();
-      },
-    };
-  }
+  console.log(`[browser] launch via executablePath: ${executablePath}`);
 
-  const browser = await chromium.launch({ headless: false });
-  const page = await browser.newPage();
+  const browser = await chromium.launch({
+    headless: false,
+    executablePath,
+  });
+
+  const context = await browser.newContext({
+    viewport: null,
+  });
+
+  const page: Page = await context.newPage();
+
   await ensureWindowMaximized(page);
+
   return {
     page,
     close: async () => {
+      await context.close();
       await browser.close();
     },
   };
