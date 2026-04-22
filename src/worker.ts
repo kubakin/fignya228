@@ -25,7 +25,7 @@ import { config as loadEnv } from "dotenv";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { runTestStrategy } from "./test-strategy.js";
+import { runTestStrategy } from "./test/test-strategy.js";
 
 loadEnv({ path: resolve(process.cwd(), ".env") });
 
@@ -91,7 +91,6 @@ async function fetchTask(): Promise<TaskPayload | null> {
     throw new Error(`Task endpoint returned ${resp.status}`);
   }
   const body = (await resp.json()) as unknown;
-  console.log(body)
   if (!body || typeof body !== "object") return null;
   const obj = body as Record<string, unknown>;
   if (obj.hasTask === false) return null;

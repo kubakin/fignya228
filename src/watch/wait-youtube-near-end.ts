@@ -9,13 +9,13 @@
  */
 
 import type { Page } from "playwright";
-import { randFloat } from "./mouse-path.js";
+import { randFloat } from "../browser/mouse-path.js";
 import { keyboard } from "@nut-tree-fork/nut-js";
 import { Key } from "@nut-tree-fork/shared";
 import {
   nutHumanMoveAndClick,
   nutHumanMoveAndClickScreenPoint,
-} from "./nut-move-click.js";
+} from "../browser/nut-move-click.js";
 
 function envRatio(name: string, fallback: number): number {
   const v = Number(process.env[name]?.trim());
@@ -231,6 +231,18 @@ function evalVideoSnapshot(): {
   };
 }
 
+function evalTryResumeVideo(): boolean {
+  const v =
+    document.querySelector("ytd-player video") ??
+    document.querySelector("#movie_player video") ??
+    document.querySelector("video");
+  if (!v) return false;
+  const el = v as HTMLVideoElement;
+  if (!el.paused) return false;
+  void el.play();
+  return true;
+}
+
 function isWatchUrl(url: string): boolean {
   try {
     const u = new URL(url);
@@ -335,7 +347,12 @@ export async function waitForYoutubeVideoNearEndIfWatch(
     attempt++;
     videoLog("ожидание прогресса", { attempt, retryMax });
 
-    await waitVideoReady(page);
+    try {
+      await waitVideoReady(page);
+    } catch {
+      videoLog("видео не готово в отведенное время; пропускаем ожидание near-end");
+      return false;
+    }
 
     const snapReady = await page.evaluate(evalVideoSnapshot);
     if (
@@ -368,13 +385,7 @@ export async function waitForYoutubeVideoNearEndIfWatch(
       });
     }
 
-    await page.evaluate(function () {
-      const v =
-        document.querySelector("ytd-player video") ??
-        document.querySelector("#movie_player video") ??
-        document.querySelector("video");
-      if (v && (v as HTMLVideoElement).paused) void (v as HTMLVideoElement).play();
-    });
+    await page.evaluate(evalTryResumeVideo).catch(() => false);
 
     if (targetWatchSec === null) {
       const s = await page.evaluate(evalVideoSnapshot);
@@ -388,8 +399,11 @@ export async function waitForYoutubeVideoNearEndIfWatch(
     }
 
     const tickMs = progressTickIntervalMs();
-    const logProgressSnapshot = (): void => {
-      void Promise.all([
+    let lastProgressSec = -1;
+    let lastProgressAt = Date.now();
+    let lastKickAt = 0;
+    const logProgressSnapshot = async (): Promise<void> => {
+      await Promise.all([
         page.evaluate(evalVideoSnapshot),
         page.evaluate(evalIsAdShowing),
       ]).then(([s, isAd]) => {
@@ -411,10 +425,34 @@ export async function waitForYoutubeVideoNearEndIfWatch(
           ad: isAd,
           needPercent: Number(needPercent.toFixed(2)),
         });
-      });
+      }).catch(() => {});
+
+      const snap = await page.evaluate(evalVideoSnapshot).catch(() => null);
+      const isAdNow = await page.evaluate(evalIsAdShowing).catch(() => false);
+      if (!snap || !Number.isFinite(snap.currentTime)) return;
+      if (isAdNow) {
+        lastProgressSec = -1;
+        lastProgressAt = Date.now();
+        return;
+      }
+      if (snap.currentTime > lastProgressSec + 0.2) {
+        lastProgressSec = snap.currentTime;
+        lastProgressAt = Date.now();
+        return;
+      }
+      const nowMs = Date.now();
+      if (nowMs - lastProgressAt < 15_000) return;
+      if (nowMs - lastKickAt < 8_000) return;
+      lastKickAt = nowMs;
+      videoLog("обнаружен застой прогресса; пробуем оживить воспроизведение");
+      await page.evaluate(evalTryResumeVideo).catch(() => false);
+      keyboard.config.autoDelayMs = 0;
+      await keyboard.type("k").catch(() => {});
     };
-    logProgressSnapshot();
-    const tick = setInterval(logProgressSnapshot, tickMs);
+    void logProgressSnapshot();
+    const tick = setInterval(() => {
+      void logProgressSnapshot();
+    }, tickMs);
 
     try {
       await page.waitForFunction(
@@ -437,9 +475,14 @@ export async function waitForYoutubeVideoNearEndIfWatch(
             document.querySelector("#movie_player video") ??
             document.querySelector("video");
           if (!v) return false;
-          const d = (v as HTMLVideoElement).duration;
+          const el = v as HTMLVideoElement;
+          if (el.paused) {
+            void el.play();
+            return false;
+          }
+          const d = el.duration;
           if (typeof d !== "number" || !Number.isFinite(d) || d <= 0) return false;
-          return (v as HTMLVideoElement).currentTime >= targetSec;
+          return el.currentTime >= targetSec;
         },
         { targetSec: targetWatchSec ?? Number.MAX_SAFE_INTEGER },
         {

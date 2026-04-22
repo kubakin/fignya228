@@ -54,8 +54,8 @@
  *     PLAYWRIGHT_USER_DATA_DIR=путь — постоянный профиль (куки между запусками); опционально PLAYWRIGHT_BROWSER_CHANNEL=chrome|msedge|chromium
  */
 
-import { keyboard, mouse, sleep, straightTo } from "@nut-tree-fork/nut-js";
-import { Key, Point } from "@nut-tree-fork/shared";
+import { keyboard, sleep } from "@nut-tree-fork/nut-js";
+import { Key } from "@nut-tree-fork/shared";
 import { config as loadEnv } from "dotenv";
 import { resolve } from "node:path";
 import type { Locator, Page } from "playwright";
@@ -64,33 +64,33 @@ import {
   pressEnterAfterTyping,
   resolveTypoRatio,
   typeTextWithNut,
-} from "./human-typing.js";
-import { nutClickVideoTitleLink } from "./click-video-title.js";
-import {
-  getPartialTypingSplitForSuggestion,
-  maybeClickRandomYtSuggestion,
-} from "./yt-search-suggestion.js";
-import {
-  runHumanScrollDownPhase,
-} from "./human-scroll.js";
-import { randFloat } from "./mouse-path.js";
+} from "./browser/human-typing.js";
+import { randFloat } from "./browser/mouse-path.js";
 import {
   nutHumanMoveAndClick,
-  nutHumanMoveAndClickScreenPoint,
-} from "./nut-move-click.js";
-import { waitForYoutubeVideoNearEndIfWatch } from "./wait-youtube-near-end.js";
-import { createBrowserSession } from "./browser-session.js";
-import { scrollFindChannelHrefOrFallbackSearch } from "./channel-scroll-find.js";
-import { stage2ClickVideosAndOpenVideoByHref } from "./stage2-channel-videos.js";
+} from "./browser/nut-move-click.js";
+import { waitForYoutubeVideoNearEndIfWatch } from "./watch/wait-youtube-near-end.js";
+import { createBrowserSession } from "./browser/browser-session.js";
+import { scrollFindChannelHrefOrFallbackSearch } from "./stage2/channel-scroll-find.js";
+import { stage2ClickVideosAndOpenVideoByHref } from "./stage2/stage2-channel-videos.js";
+import { ensureVideoPlayingIfPaused } from "./browser/video-playback.js";
 import {
   resolveStage2Strategy,
   type Stage2Strategy,
-} from "./stage2-strategy.js";
+} from "./stage2/stage2-strategy.js";
+import {
+  hasCaptchaOrVerification,
+  resolveStage2VideoEndRatios,
+  stage2DirectLinkStrategy,
+  stage2TimeoutMs,
+} from "./stage2/stage2-runtime.js";
+import { runExternalLinkPatchAndClickStrategy } from "./stage2/stage2-external-link.js";
+import { executeStage1Flow } from "./stage1/stage1-flow.js";
 import {
   appendErrorLog,
   ensurePlaywrightBrowsersIfNeeded,
   setupGlobalErrorLogging,
-} from "./exe-runtime.js";
+} from "./runtime/exe-runtime.js";
 
 /** Рядом с рабочей директорией (для exe — папка, откуда запускают). */
 loadEnv({ path: resolve(process.cwd(), ".env") });
@@ -159,63 +159,6 @@ async function reportTeamTaskStatus(
   }
 }
 
-type SidebarPick = { selector: string; idx: number } | null;
-
-/** Stage2 «досмотр»: STAGE2_VIDEO_END_MIN_RATIO или короткий алиас STAGE2_VIDEO_END_MIN, затем VIDEO_END_MIN_RATIO. */
-function resolveStage2VideoEndRatios(): { min: number; max: number } {
-  const minStr =
-    process.env.STAGE2_VIDEO_END_MIN_RATIO?.trim() ||
-    process.env.STAGE2_VIDEO_END_MIN?.trim() ||
-    process.env.VIDEO_END_MIN_RATIO?.trim() ||
-    "";
-  const maxStr =
-    process.env.STAGE2_VIDEO_END_MAX_RATIO?.trim() ||
-    process.env.STAGE2_VIDEO_END_MAX?.trim() ||
-    process.env.VIDEO_END_MAX_RATIO?.trim() ||
-    "";
-  const minN = minStr !== "" ? Number(minStr) : NaN;
-  const maxN = maxStr !== "" ? Number(maxStr) : NaN;
-  return {
-    min: Number.isFinite(minN) ? minN : 0.8,
-    max: Number.isFinite(maxN) ? maxN : 1.0,
-  };
-}
-
-async function pickRandomVisibleSidebarVideo(page: Page): Promise<SidebarPick> {
-  const selectors = [
-    "a.ytLockupMetadataViewModelTitle",
-    "ytd-compact-video-renderer a#video-title",
-    "ytd-watch-next-secondary-results-renderer a#video-title",
-  ];
-
-  for (const sel of selectors) {
-    const idx = await page.evaluate(
-      ({ selector }: { selector: string }) => {
-        const nodes = document.querySelectorAll(selector);
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        const visible: number[] = [];
-        for (let i = 0; i < nodes.length; i++) {
-          const r = (nodes[i] as Element).getBoundingClientRect();
-          const intersects =
-            r.width > 0 &&
-            r.height > 0 &&
-            r.bottom > 0 &&
-            r.right > 0 &&
-            r.left < vw &&
-            r.top < vh;
-          if (intersects) visible.push(i);
-        }
-        if (visible.length === 0) return -1;
-        return visible[Math.floor(Math.random() * visible.length)]!;
-      },
-      { selector: sel }
-    );
-    if (idx >= 0) return { selector: sel, idx };
-  }
-  return null;
-}
-
 function parseProb(name: string, fallback: number): number {
   const n = Number(process.env[name]?.trim());
   if (!Number.isFinite(n)) return fallback;
@@ -242,197 +185,22 @@ async function nutSearchFromAddressBar(query: string): Promise<void> {
   await sleep(randFloat(1200, 2400));
 }
 
-function stage2TimeoutMs(): number {
-  const n = Number(
-    process.env.STAGE2_STRATEGY_TIMEOUT_MS ??
-      process.env.STAGE2_VARIANT_TIMEOUT_MS ??
-      300_000
-  );
-  if (!Number.isFinite(n)) return 300_000;
-  const ms = Math.floor(n);
-  if (ms < 10_000) return 10_000;
-  // Hard cap: if strategy hangs, force fallback to direct URL after <= 5 minutes.
-  return Math.min(ms, 300_000);
-}
-
-async function hasCaptchaOrVerification(page: Page): Promise<boolean> {
-  try {
-    const url = page.url().toLowerCase();
-    if (
-      url.includes("captcha") ||
-      url.includes("sorry") ||
-      url.includes("consent.youtube.com")
-    ) {
-      return true;
-    }
-    const bodyText = await page.evaluate(() => (document.body?.innerText || "").toLowerCase());
-    return (
-      bodyText.includes("captcha") ||
-      bodyText.includes("verify you are human") ||
-      bodyText.includes("подтвердите") ||
-      bodyText.includes("я не робот")
-    );
-  } catch {
-    return false;
-  }
-}
-
-async function stage2DirectLinkStrategy(opts: {
-  page: Page;
-  channelTargetHref?: string;
-  videoTargetHref?: string;
-}): Promise<void> {
-  const directHref = (opts.videoTargetHref?.trim() || opts.channelTargetHref?.trim() || "");
-  if (!directHref) {
-    throw new Error("stage2 directLinkStrategy: no direct link available (VIDEO_TARGET_HREF/CHANNEL_TARGET_HREF).");
-  }
-  console.log(`[stage2] directLinkStrategy navigate: ${directHref}`);
-  await nutSearchFromAddressBar(directHref);
-  await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
-  await ensureVideoPlayingIfPaused(opts.page);
-}
-
-async function dismissModalboxIfVisible(page: Page): Promise<boolean> {
-  const point = await page.evaluate(function () {
-    const modal = document.querySelector('[data-testid="modalbox"]') as HTMLElement | null;
-    if (!modal) return null;
-    const style = window.getComputedStyle(modal);
-    if (
-      style.display === "none" ||
-      style.visibility === "hidden" ||
-      Number(style.opacity || "1") < 0.05
-    ) {
-      return null;
-    }
-
-    const r = modal.getBoundingClientRect();
-    if (r.width < 20 || r.height < 20) return null;
-    if (
-      r.bottom <= 0 ||
-      r.top >= window.innerHeight ||
-      r.right <= 0 ||
-      r.left >= window.innerWidth
-    ) {
-      return null;
-    }
-
-    const chromeTop = window.outerHeight - window.innerHeight;
-    const chromeLeft = window.outerWidth - window.innerWidth;
-    const cx = Math.min(window.innerWidth - 8, Math.max(8, r.left + r.width / 2));
-    const offset = 18 + Math.floor(Math.random() * (54 - 18 + 1));
-    const cy = Math.min(window.innerHeight - 8, Math.max(8, r.top - offset));
-    return {
-      x: Math.round(window.screenX + chromeLeft / 2 + cx),
-      y: Math.round(window.screenY + chromeTop + cy),
-    };
-  });
-
-  if (!point) return false;
-  await nutHumanMoveAndClickScreenPoint(point.x, point.y);
-  await sleep(randFloat(220, 520));
-  return true;
-}
-
 async function stage2VkStrategy(opts: {
   page: Page;
   vkGroupUrl: string;
   videoTargetHref: string;
 }): Promise<void> {
-  console.log("[stage2][vkStrategy] start", {
-    vkGroupUrl: opts.vkGroupUrl,
+  await runExternalLinkPatchAndClickStrategy({
+    page: opts.page,
+    strategyName: "vkStrategy",
+    entryUrl: opts.vkGroupUrl,
     videoTargetHref: opts.videoTargetHref,
+    hoverCountMax: 4,
+    requireLoadBeforeScroll: true,
+    linkClassPrefix: "vkitLink__link",
+    navigateByAddressBar: nutSearchFromAddressBar,
+    ensureVideoPlayingIfPaused,
   });
-  await nutSearchFromAddressBar(opts.vkGroupUrl);
-  await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
-  await opts.page.waitForLoadState("load", { timeout: 60_000 }).catch(() => {});
-  await sleep(randFloat(1000, 2200));
-
-  console.log("[stage2][vkStrategy] initial human scroll");
-  await runHumanScrollDownPhase(opts.page);
-  const hoverPoints = await opts.page.evaluate(function () {
-    const els = document.querySelectorAll("a, button, div, img, span");
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const chromeTop = window.outerHeight - window.innerHeight;
-    const chromeLeft = window.outerWidth - window.innerWidth;
-    const points: Array<{ x: number; y: number }> = [];
-    for (let i = 0; i < els.length && points.length < 4; i++) {
-      const e = els[i] as Element;
-      const r = e.getBoundingClientRect();
-      const intersects =
-        r.width > 10 &&
-        r.height > 10 &&
-        r.bottom > 0 &&
-        r.right > 0 &&
-        r.left < vw &&
-        r.top < vh;
-      if (!intersects) continue;
-      points.push({
-        x: Math.round(window.screenX + chromeLeft / 2 + r.left + r.width / 2),
-        y: Math.round(window.screenY + chromeTop + r.top + r.height / 2),
-      });
-    }
-    return points;
-  });
-  console.log("[stage2][vkStrategy] hover points prepared", { count: hoverPoints.length });
-  for (const p of hoverPoints) {
-    mouse.config.autoDelayMs = 0;
-    mouse.config.mouseSpeed = randFloat(340, 860);
-    await mouse.move(straightTo(new Point(p.x, p.y)));
-    await sleep(randFloat(250, 700));
-  }
-  console.log("[stage2][vkStrategy] hover simulation done");
-
-  const linkInfo = await opts.page.evaluate(function ({ youtubeHref }: { youtubeHref: string }) {
-    const links = document.querySelectorAll("a[href]");
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const absHrefRe = /^https?:\/\//i;
-    for (let j = 0; j < links.length; j++) {
-      (links[j] as HTMLAnchorElement).removeAttribute("data-yt-worker-patched");
-    }
-    for (let i = 0; i < links.length; i++) {
-      const a = links[i] as HTMLAnchorElement;
-      const classMatches = Array.from(a.classList).some((cls) => cls.startsWith("vkitLink__link"));
-      if (!classMatches) continue;
-      const rawHref = (a.getAttribute("href") || "").trim();
-      if (!absHrefRe.test(rawHref)) continue;
-      const r = a.getBoundingClientRect();
-      const intersects =
-        r.width > 8 &&
-        r.height > 8 &&
-        r.bottom > 0 &&
-        r.right > 0 &&
-        r.left < vw &&
-        r.top < vh;
-      if (!intersects) continue;
-      const beforeHref = a.getAttribute("href") || a.href || "";
-      a.setAttribute("href", youtubeHref);
-      a.setAttribute("target", "_self");
-      a.removeAttribute("onclick");
-      a.setAttribute("rel", "noopener");
-      a.setAttribute("data-yt-worker-patched", "1");
-      const afterHref = a.getAttribute("href") || a.href || "";
-      return { i, beforeHref, afterHref };
-    }
-    return null;
-  }, { youtubeHref: opts.videoTargetHref });
-  console.log("[stage2][vkStrategy] link patch result", linkInfo);
-  if (!linkInfo) {
-    throw new Error("stage2 vkStrategy: no visible link found to patch href");
-  }
-  const link = opts.page.locator("a[data-yt-worker-patched='1']").first();
-  await link.scrollIntoViewIfNeeded();
-  const modalDismissed = await dismissModalboxIfVisible(opts.page);
-  if (modalDismissed) {
-    console.log("[stage2][vkStrategy] modalbox dismissed before link click");
-  }
-  console.log("[stage2][vkStrategy] clicking patched link");
-  await nutHumanMoveAndClick(link);
-  await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
-  console.log("[stage2][vkStrategy] reached target page, ensure playback");
-  await ensureVideoPlayingIfPaused(opts.page);
-  console.log("[stage2][vkStrategy] done");
 }
 
 async function stage2LandingStrategy(opts: {
@@ -440,232 +208,16 @@ async function stage2LandingStrategy(opts: {
   landingUrl: string;
   videoTargetHref: string;
 }): Promise<void> {
-  console.log("[stage2][landingStrategy] start", {
-    landingUrl: opts.landingUrl,
+  await runExternalLinkPatchAndClickStrategy({
+    page: opts.page,
+    strategyName: "landingStrategy",
+    entryUrl: opts.landingUrl,
     videoTargetHref: opts.videoTargetHref,
+    hoverCountMax: 5,
+    requireLoadBeforeScroll: false,
+    navigateByAddressBar: nutSearchFromAddressBar,
+    ensureVideoPlayingIfPaused,
   });
-  await nutSearchFromAddressBar(opts.landingUrl);
-  await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
-  await sleep(randFloat(1000, 2200));
-
-  console.log("[stage2][landingStrategy] initial human scroll");
-  await runHumanScrollDownPhase(opts.page);
-  const hoverPoints = await opts.page.evaluate(function () {
-    const els = document.querySelectorAll("a, button, div, img, span");
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const chromeTop = window.outerHeight - window.innerHeight;
-    const chromeLeft = window.outerWidth - window.innerWidth;
-    const points: Array<{ x: number; y: number }> = [];
-    for (let i = 0; i < els.length && points.length < 5; i++) {
-      const e = els[i] as Element;
-      const r = e.getBoundingClientRect();
-      const intersects =
-        r.width > 10 &&
-        r.height > 10 &&
-        r.bottom > 0 &&
-        r.right > 0 &&
-        r.left < vw &&
-        r.top < vh;
-      if (!intersects) continue;
-      points.push({
-        x: Math.round(window.screenX + chromeLeft / 2 + r.left + r.width / 2),
-        y: Math.round(window.screenY + chromeTop + r.top + r.height / 2),
-      });
-    }
-    return points;
-  });
-  console.log("[stage2][landingStrategy] hover points prepared", { count: hoverPoints.length });
-  for (const p of hoverPoints) {
-    mouse.config.autoDelayMs = 0;
-    mouse.config.mouseSpeed = randFloat(340, 860);
-    await mouse.move(straightTo(new Point(p.x, p.y)));
-    await sleep(randFloat(250, 700));
-  }
-  console.log("[stage2][landingStrategy] hover simulation done");
-
-  const linkInfo = await opts.page.evaluate(function ({ youtubeHref }: { youtubeHref: string }) {
-    const links = document.querySelectorAll("a[href]");
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const absHrefRe = /^https?:\/\//i;
-    for (let j = 0; j < links.length; j++) {
-      (links[j] as HTMLAnchorElement).removeAttribute("data-yt-worker-patched");
-    }
-    for (let i = 0; i < links.length; i++) {
-      const a = links[i] as HTMLAnchorElement;
-      const rawHref = (a.getAttribute("href") || "").trim();
-      if (!absHrefRe.test(rawHref)) continue;
-      const r = a.getBoundingClientRect();
-      const intersects =
-        r.width > 8 &&
-        r.height > 8 &&
-        r.bottom > 0 &&
-        r.right > 0 &&
-        r.left < vw &&
-        r.top < vh;
-      if (!intersects) continue;
-      const beforeHref = a.getAttribute("href") || a.href || "";
-      a.setAttribute("href", youtubeHref);
-      a.setAttribute("target", "_self");
-      a.removeAttribute("onclick");
-      a.setAttribute("rel", "noopener");
-      a.setAttribute("data-yt-worker-patched", "1");
-      const afterHref = a.getAttribute("href") || a.href || "";
-      return { i, beforeHref, afterHref };
-    }
-    return null;
-  }, { youtubeHref: opts.videoTargetHref });
-  console.log("[stage2][landingStrategy] link patch result", linkInfo);
-  if (!linkInfo) {
-    throw new Error("stage2 landingStrategy: no visible absolute link found to patch href");
-  }
-  const link = opts.page.locator("a[data-yt-worker-patched='1']").first();
-  await link.scrollIntoViewIfNeeded();
-  const modalDismissed = await dismissModalboxIfVisible(opts.page);
-  if (modalDismissed) {
-    console.log("[stage2][landingStrategy] modalbox dismissed before link click");
-  }
-  console.log("[stage2][landingStrategy] clicking patched link");
-  await nutHumanMoveAndClick(link);
-  await opts.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
-  console.log("[stage2][landingStrategy] reached target page, ensure playback");
-  await ensureVideoPlayingIfPaused(opts.page);
-  console.log("[stage2][landingStrategy] done");
-}
-
-/**
- * Screen pixel for a reliable play interaction: overlay play control or lower player area.
- * Avoids clicking the first <video> in DOM (can be wrong/hidden and send cursor off-screen).
- */
-async function resolveYoutubePlaybackClickScreenPx(
-  page: Page
-): Promise<{ x: number; y: number } | null> {
-  // Одна function без вложенных хелперов — иначе esbuild/tsx подставляет __name в evaluate и падает в браузере.
-  return page.evaluate(function () {
-    const chromeTop = window.outerHeight - window.innerHeight;
-    const chromeLeft = window.outerWidth - window.innerWidth;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const playSelectors = [
-      ".ytp-play-button",
-      ".ytp-large-play-button",
-      "button.ytp-play-button",
-      ".ytp-cued-thumbnail-overlay",
-    ];
-    let i: number;
-    let el: Element | null;
-    let r: DOMRect;
-    let lx: number;
-    let ly: number;
-    for (i = 0; i < playSelectors.length; i++) {
-      el = document.querySelector(playSelectors[i]!);
-      if (!el) continue;
-      r = el.getBoundingClientRect();
-      if (r.width < 4 || r.height < 4) continue;
-      lx = r.left + r.width / 2;
-      ly = r.top + r.height / 2;
-      if (lx < 0 || ly < 0 || lx > vw || ly > vh) continue;
-      return {
-        x: Math.round(window.screenX + chromeLeft / 2 + lx),
-        y: Math.round(window.screenY + chromeTop + ly),
-      };
-    }
-    el =
-      document.querySelector("#movie_player") ??
-      document.querySelector("ytd-player#player") ??
-      document.querySelector("ytd-player");
-    if (el) {
-      r = el.getBoundingClientRect();
-      if (r.width > 20 && r.height > 20) {
-        lx = r.left + r.width / 2;
-        ly = r.top + Math.min(r.height * 0.58, r.height - 28);
-        if (lx >= 0 && ly >= 0 && lx <= vw && ly <= vh) {
-          return {
-            x: Math.round(window.screenX + chromeLeft / 2 + lx),
-            y: Math.round(window.screenY + chromeTop + ly),
-          };
-        }
-      }
-    }
-    lx = vw / 2;
-    ly = vh * 0.48;
-    return {
-      x: Math.round(window.screenX + chromeLeft / 2 + lx),
-      y: Math.round(window.screenY + chromeTop + ly),
-    };
-  });
-}
-
-async function evalMainVideoPaused(page: Page): Promise<boolean | null> {
-  return page.evaluate(function () {
-    const v =
-      document.querySelector("ytd-player video") ??
-      document.querySelector("#movie_player video") ??
-      document.querySelector("video");
-    if (!v) return null;
-    return (v as HTMLVideoElement).paused;
-  });
-}
-
-async function ensureVideoPlayingIfPaused(page: Page): Promise<void> {
-  await sleep(randFloat(500, 1100));
-
-  let paused = await evalMainVideoPaused(page);
-  if (paused === null) return;
-  if (!paused) return;
-
-  console.log("[stage2] directLinkStrategy: video is paused, starting playback (nut.js)");
-
-  keyboard.config.autoDelayMs = 0;
-
-  const tryHotkeys = async (): Promise<void> => {
-    if ((await evalMainVideoPaused(page)) !== true) return;
-    await sleep(randFloat(120, 280));
-    await keyboard.type(" ");
-    await sleep(randFloat(280, 520));
-    if ((await evalMainVideoPaused(page)) !== true) return;
-    await sleep(randFloat(80, 200));
-    await keyboard.type(Key.K);
-    await sleep(randFloat(280, 520));
-  };
-
-  for (let attempt = 0; attempt < 3 && paused === true; attempt++) {
-    const pt = await resolveYoutubePlaybackClickScreenPx(page);
-    if (pt) {
-      try {
-        await nutHumanMoveAndClickScreenPoint(pt.x, pt.y);
-        await sleep(randFloat(220, 480));
-      } catch (e) {
-        console.warn("[stage2] directLinkStrategy: mouse click failed, trying keys only:", e);
-      }
-    }
-
-    await tryHotkeys();
-    paused = await evalMainVideoPaused(page);
-    if (paused === null || paused === false) break;
-  }
-
-  const playBtn = page.locator(".ytp-play-button, .ytp-large-play-button").first();
-  try {
-    if ((await evalMainVideoPaused(page)) === true) {
-      await playBtn.waitFor({ state: "visible", timeout: 2500 });
-      await nutHumanMoveAndClick(playBtn);
-      await sleep(randFloat(300, 600));
-    }
-  } catch {
-    // ignore
-  }
-
-  if ((await evalMainVideoPaused(page)) === true) {
-    await tryHotkeys();
-  }
-
-  const after = await evalMainVideoPaused(page);
-  const playing = after === false;
-  console.log(
-    `[stage2] directLinkStrategy: video playing=${playing}${after === null ? " (no <video>)" : ""}`
-  );
 }
 
 async function findAndClickVisibleSearchLink(page: Page, opts: {
@@ -730,76 +282,6 @@ async function findAndClickVisibleSearchLink(page: Page, opts: {
   }
 
   return false;
-}
-
-async function executeStage1(opts: {
-  runStage1: boolean;
-  runStage1Base: boolean;
-  channelMode: boolean;
-  text: string;
-  typoRatio: number;
-  page: Page;
-  input: Locator;
-  taskId: string | undefined;
-}): Promise<{ stage1Completed: boolean; videoNearEndDone: boolean }> {
-  let stage1Completed = false;
-  if (opts.runStage1) {
-    try {
-      const ytSplit = getPartialTypingSplitForSuggestion(opts.text);
-      const partialFlowNoEnter = Math.random() < 0.5;
-
-      if (partialFlowNoEnter) {
-        if (ytSplit) {
-          await typeTextWithNut(ytSplit.first, { typoRatio: opts.typoRatio });
-          await maybeClickRandomYtSuggestion(opts.page, opts.text);
-          if (ytSplit.rest.length > 0) {
-            await typeTextWithNut(ytSplit.rest, { typoRatio: opts.typoRatio });
-          }
-        } else {
-          await typeTextWithNut(opts.text, { typoRatio: opts.typoRatio });
-        }
-        if (opts.channelMode) {
-          await pressEnterAfterTyping();
-        }
-      } else {
-        await typeTextWithNut(opts.text, { typoRatio: opts.typoRatio });
-        await maybeClickRandomYtSuggestion(opts.page, opts.text);
-        await pressEnterAfterTyping();
-      }
-      stage1Completed = true;
-    } catch (e) {
-      console.warn("[stage1] failed, continuing to stage2:", e);
-    }
-  } else if (opts.runStage1Base) {
-    console.log("[stage1] skipped by STAGE1_SKIP_PROB");
-  }
-
-  let videoNearEndDone = false;
-  if (stage1Completed) {
-    await runHumanScrollDownPhase(opts.page);
-    await nutClickVideoTitleLink(opts.page);
-    videoNearEndDone = await waitForYoutubeVideoNearEndIfWatch(opts.page);
-    if (videoNearEndDone) {
-      console.log("hello world");
-      if (Math.random() < 0.5) {
-        const picked = await pickRandomVisibleSidebarVideo(opts.page);
-        if (picked) {
-          const side = opts.page.locator(picked.selector).nth(picked.idx);
-          await nutHumanMoveAndClick(side);
-          await opts.page.waitForLoadState("domcontentloaded", {
-            timeout: 60_000,
-          }).catch(() => {});
-          await sleep(randFloat(900, 1700));
-          await waitForYoutubeVideoNearEndIfWatch(opts.page);
-        }
-      }
-    }
-  }
-
-  if (stage1Completed) {
-    await reportTeamTaskStatus(opts.taskId, "process");
-  }
-  return { stage1Completed, videoNearEndDone };
 }
 
 async function runChosenStage2Strategy(opts: {
@@ -909,6 +391,8 @@ async function runChosenStage2Strategy(opts: {
     page: opts.page,
     channelTargetHref: opts.channelTargetHref,
     videoTargetHref: opts.videoTargetHref,
+    navigateByAddressBar: nutSearchFromAddressBar,
+    ensureVideoPlayingIfPaused,
   });
 }
 
@@ -968,6 +452,8 @@ async function executeStage2(opts: {
       page: opts.page,
       channelTargetHref: opts.channelTargetHref,
       videoTargetHref: opts.videoTargetHref,
+      navigateByAddressBar: nutSearchFromAddressBar,
+      ensureVideoPlayingIfPaused,
     });
   }
 
@@ -1029,7 +515,7 @@ async function main(): Promise<void> {
     await input.waitFor({ state: "visible", timeout: 30_000 });
     await moveCursorAndClickToFocus(page, input);
     const typoRatio = resolveTypoRatio();
-    const { videoNearEndDone } = await executeStage1({
+    const { videoNearEndDone } = await executeStage1Flow({
       runStage1,
       runStage1Base,
       channelMode,
@@ -1037,7 +523,7 @@ async function main(): Promise<void> {
       typoRatio,
       page,
       input,
-      taskId,
+      onStage1Process: () => reportTeamTaskStatus(taskId, "process"),
     });
 
     const stage2WatchOk = await executeStage2({

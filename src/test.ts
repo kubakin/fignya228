@@ -1,7 +1,7 @@
 import { config as loadEnv } from "dotenv";
 import { resolve } from "node:path";
-import { runTestStrategy } from "./test-strategy.js";
-import { appendErrorLog, ensurePlaywrightBrowsersIfNeeded, setupGlobalErrorLogging } from "./exe-runtime.js";
+import { runTestStrategy } from "./test/test-strategy.js";
+import { appendErrorLog, ensurePlaywrightBrowsersIfNeeded, setupGlobalErrorLogging } from "./runtime/exe-runtime.js";
 
 loadEnv({ path: resolve(process.cwd(), ".env") });
 setupGlobalErrorLogging();

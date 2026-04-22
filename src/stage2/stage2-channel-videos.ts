@@ -6,8 +6,8 @@
 import { keyboard, mouse, sleep, straightTo } from "@nut-tree-fork/nut-js";
 import { Key, Point } from "@nut-tree-fork/shared";
 import type { Page } from "playwright";
-import { randFloat } from "./mouse-path.js";
-import { nutHumanMoveAndClick } from "./nut-move-click.js";
+import { randFloat } from "../browser/mouse-path.js";
+import { nutHumanMoveAndClick } from "../browser/nut-move-click.js";
 
 function envMs(name: string, fallback: number): number {
   const v = Number(process.env[name]?.trim());

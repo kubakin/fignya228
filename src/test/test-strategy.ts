@@ -1,12 +1,12 @@
 import { keyboard, sleep } from "@nut-tree-fork/nut-js";
 import { Key } from "@nut-tree-fork/shared";
 import type { Page } from "playwright";
-import { createBrowserSession } from "./browser-session.js";
-import { clearFocusedField, pressEnterAfterTyping, resolveTypoRatio, typeTextWithNut } from "./human-typing.js";
-import { runHumanScrollDownPhase } from "./human-scroll.js";
-import { nutHumanMoveAndClick } from "./nut-move-click.js";
-import { waitForYoutubeVideoNearEndIfWatch } from "./wait-youtube-near-end.js";
-import { randFloat } from "./mouse-path.js";
+import { createBrowserSession } from "../browser/browser-session.js";
+import { clearFocusedField, pressEnterAfterTyping, resolveTypoRatio, typeTextWithNut } from "../browser/human-typing.js";
+import { runHumanScrollDownPhase } from "../browser/human-scroll.js";
+import { nutHumanMoveAndClick } from "../browser/nut-move-click.js";
+import { waitForYoutubeVideoNearEndIfWatch } from "../watch/wait-youtube-near-end.js";
+import { randFloat } from "../browser/mouse-path.js";
 
 function homeVideosCount(): number {
   const n = Number(process.env.TEST_HOME_VIDEOS_COUNT ?? "2");
